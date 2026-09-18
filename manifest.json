@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "graph",
+  "name": "Graph",
+  "version": "1.3.0",
+  "author": "1990wn",
+  "license": "MIT",
+  "description": "Theme-aware graphing calculator. Type an equation, then zoom, pan, and slide every coefficient live.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Graph",
+    "description": "Plot an equation with zoom and coefficient sliders that follow the current Omarchy theme.",
+    "category": "Tools",
+    "aliases": [
+      "graph",
+      "plot",
+      "grapher",
+      "equation",
+      "calculator"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "center"
+  }
+}
