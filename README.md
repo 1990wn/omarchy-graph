@@ -4,7 +4,7 @@ A theme-aware graphing calculator for the [Omarchy](https://omarchy.org/) shell.
 Type an equation, and the plot follows the colors, fonts, and corners of the
 theme you already have selected.
 
-![preview](preview.png)
+![r = sin(3t)](screenshot.png)
 
 Coefficients become sliders. `y = 2*sin(x)` grows an `a` slider whose default
 is 2; `y = a*sin(b*x + c)` gives you `a`, `b`, and `c`. A tracer slider walks
