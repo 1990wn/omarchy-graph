@@ -87,6 +87,8 @@ Panel {
   // Lower limit of the shaded integral. NaN means the default: the origin for
   // cartesian plots, the start of the parameter range for curves.
   property real areaFrom: NaN
+  property bool showDerivative: false
+  property bool areaBetweenMode: false
   property int sliderEdits: 0
 
   function noteSliderFocus(on) {
@@ -120,6 +122,13 @@ Panel {
     }
     return isCurve ? tMax : xMax
   }
+  readonly property var derivativeAst: (!analysis || !analysis.ok || is3d
+    || plotKind !== "cartesian" || !analysis.expressions.length)
+    ? null
+    : Equation.derivative(analysis.expressions[0].ast, analysis.independent || "x")
+  readonly property string derivativePretty: derivativeAst ? Equation.pretty(derivativeAst) : ""
+  readonly property bool derivativeShown: showDerivative && !is3d && plotKind === "cartesian"
+  readonly property bool betweenShown: areaBetweenMode && !isCurve && !is3d && series.length >= 2
   readonly property bool areaBoundSet: isFinite(areaFrom)
   readonly property real areaStart: areaBoundSet ? areaFrom : (isCurve ? tMin : 0)
   readonly property var geom: geometryAt(liveTraceX, series)
@@ -228,6 +237,20 @@ Panel {
     }
     // A refiner that cannot bracket the feature hands back the grid estimate.
     return isFinite(refined) ? refined : target.t
+  }
+
+  function toggleDerivative() {
+    if (is3d || plotKind !== "cartesian") return
+    showDerivative = !showDerivative
+    resample()
+    persistSoon()
+  }
+
+  function toggleBetween() {
+    if (is3d || isCurve) return
+    areaBetweenMode = !areaBetweenMode
+    if (areaBetweenMode) showArea = true
+    persistSoon()
   }
 
   function setAreaBound(t) {
@@ -421,6 +444,14 @@ Panel {
         var pts = Plot.sampleSeries(Equation.evaluate, expr, analysis.independent, paramList, paramValues, xMin, xMax, count)
         list.push({ points: pts, color: seriesColor(i), pretty: analysis.expressions[i].pretty })
       }
+      if (derivativeShown && list.length) {
+        // Symbolic where a rule exists, central differences otherwise, so the
+        // overlay is there for min/max/hypot too.
+        var dPts = derivativeAst
+          ? Plot.sampleSeries(Equation.evaluate, derivativeAst, analysis.independent, paramList, paramValues, xMin, xMax, count)
+          : Plot.derivativePoints(list[0].points)
+        list.push({ points: dPts, color: seriesColor(list.length), pretty: derivativePretty, derivative: true })
+      }
     }
     series = list
     if (kind === "polar" || kind === "parametric" || kind === "implicit") {
@@ -456,6 +487,10 @@ Panel {
       var y = Equation.evaluate(analysis.expressions[i].ast, env)
       out.push({ y: y, ok: isFinite(y), color: seriesColor(i) })
     }
+    if (derivativeShown && derivativeAst) {
+      var dy = Equation.evaluate(derivativeAst, env)
+      out.push({ y: dy, ok: isFinite(dy), color: seriesColor(out.length) })
+    }
     return out
   }
 
@@ -465,15 +500,28 @@ Panel {
     var pts = list && list.length && list[0] ? list[0].points : null
     if (!pts || !isFinite(t)) return empty
     var tan = Plot.tangentAt(pts, t)
+    var slopeDx = tan.dx
+    var slopeDy = tan.dy
+    if (derivativeAst && plotKind === "cartesian") {
+      // The exact slope beats a difference of two sampled neighbours.
+      var env = Plot.envFrom(analysis.independent || "x", t, paramList, paramValues)
+      var m = Equation.evaluate(derivativeAst, env)
+      if (isFinite(m)) {
+        slopeDx = 1
+        slopeDy = m
+      }
+    }
     var area = 0
-    if (plotKind === "polar") area = Plot.areaPolar(pts, areaStart, t)
+    if (betweenShown && list.length >= 2)
+      area = Plot.areaBetween(list[0].points, list[1].points, areaStart, t)
+    else if (plotKind === "polar") area = Plot.areaPolar(pts, areaStart, t)
     else if (plotKind === "parametric" || plotKind === "implicit") area = Plot.areaParametric(pts, areaStart, t)
     else area = Plot.areaCartesian(pts, areaStart, t)
     return {
       tanX: tan.x,
       tanY: tan.y,
-      tanDx: tan.dx,
-      tanDy: tan.dy,
+      tanDx: slopeDx,
+      tanDy: slopeDy,
       area: area,
       px: tan.x,
       py: tan.y
@@ -714,7 +762,9 @@ Panel {
       elevation: elevation,
       showTangent: showTangent,
       showArea: showArea,
-      areaFrom: areaBoundSet ? areaFrom : null
+      areaFrom: areaBoundSet ? areaFrom : null,
+      showDerivative: showDerivative,
+      areaBetween: areaBetweenMode
     }, null, 2) + "\n"
     configFile.setText(payload)
   }
@@ -737,6 +787,8 @@ Panel {
     if (data.showTangent === false) showTangent = false
     if (data.showArea === false) showArea = false
     areaFrom = isFinite(Number(data.areaFrom)) ? Number(data.areaFrom) : NaN
+    showDerivative = data.showDerivative === true
+    areaBetweenMode = data.areaBetween === true
     if (equationField) equationField.text = eq
     parseEquation(eq, false)
     loadingConfig = false
@@ -841,6 +893,8 @@ Panel {
             root.persistSoon()
           }
         }
+        else if (t === "d" || t === "D") root.toggleDerivative()
+        else if (t === "b" || t === "B") root.toggleBetween()
         else if (t === "[") root.panBy(-root.xHalf * 0.15)
         else if (t === "]") root.panBy(root.xHalf * 0.15)
       }
@@ -981,6 +1035,7 @@ Panel {
             snapColor: Color.urgent
             areaFrom: root.areaStart
             areaBoundSet: root.areaBoundSet
+            betweenMode: root.betweenShown
             onSetAreaBound: function(x) { root.setAreaBound(root.snapTrace(x)) }
             foreground: root.contentForeground
             background: Color.popups.background
@@ -1165,6 +1220,44 @@ Panel {
               root.showArea = !root.showArea
               root.persistSoon()
             }
+          }
+
+          Text {
+            text: "d/dx"
+            visible: !root.is3d && root.plotKind === "cartesian"
+            color: Qt.darker(root.contentForeground, 1.5)
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1
+            Layout.alignment: Qt.AlignVCenter
+            Layout.leftMargin: Style.space(6)
+          }
+
+          ToggleSwitch {
+            visible: !root.is3d && root.plotKind === "cartesian"
+            checked: root.showDerivative
+            foreground: root.contentForeground
+            onToggled: root.toggleDerivative()
+          }
+
+          Text {
+            text: "BETWEEN"
+            visible: !root.is3d && !root.isCurve && root.series.length >= 2
+            color: Qt.darker(root.contentForeground, 1.5)
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1
+            Layout.alignment: Qt.AlignVCenter
+            Layout.leftMargin: Style.space(6)
+          }
+
+          ToggleSwitch {
+            visible: !root.is3d && !root.isCurve && root.series.length >= 2
+            checked: root.areaBetweenMode
+            foreground: root.contentForeground
+            onToggled: root.toggleBetween()
           }
 
           Text {

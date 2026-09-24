@@ -933,3 +933,74 @@ function refineExtremum(f, a, b, dir) {
   }
   return (lo + hi) / 2
 }
+
+// Signed area between two series over [from, to]. Both are sampled on the same
+// grid, so the gap is a per-index difference; the segments straddling a bound
+// are cut and interpolated the way areaCartesian does.
+function areaBetween(ptsA, ptsB, from, to) {
+  if (!ptsA || !ptsB || !ptsA.length || !ptsB.length) return 0
+  var a = Math.min(from, to)
+  var b = Math.max(from, to)
+  var n = Math.min(ptsA.length, ptsB.length)
+  var sum = 0
+  var prevX = 0
+  var prevD = 0
+  var have = false
+  for (var i = 0; i < n; i++) {
+    var pa = ptsA[i]
+    var pb = ptsB[i]
+    if (!pa || !pb || !pa.ok || !pb.ok || !isFinite(pa.y) || !isFinite(pb.y)) {
+      have = false
+      continue
+    }
+    var x = pa.x
+    var d = pa.y - pb.y
+    if (have) {
+      var x0 = Math.max(a, prevX)
+      var x1 = Math.min(b, x)
+      if (x1 > x0) {
+        var span = x - prevX
+        var d0 = span > 0 ? prevD + (d - prevD) * (x0 - prevX) / span : prevD
+        var d1 = span > 0 ? prevD + (d - prevD) * (x1 - prevX) / span : d
+        sum += (d0 + d1) * 0.5 * (x1 - x0)
+      }
+    }
+    if (x > b + 1e-12) break
+    prevX = x
+    prevD = d
+    have = true
+  }
+  return from > to ? -sum : sum
+}
+
+// Central differences on the sample grid, for equations with no symbolic
+// derivative (min, max, hypot and friends).
+function derivativePoints(points) {
+  var out = []
+  if (!points || points.length < 2) return out
+  for (var i = 0; i < points.length; i++) {
+    var p = points[i]
+    if (!p) continue
+    var prev = i > 0 ? points[i - 1] : null
+    var next = i + 1 < points.length ? points[i + 1] : null
+    var slope = NaN
+    if (prev && next && prev.ok && next.ok && next.x !== prev.x) {
+      slope = (next.y - prev.y) / (next.x - prev.x)
+    } else if (p.ok) {
+      // At an edge of the window, or beside a break, there is no centred
+      // difference. Three points on the side that exists keeps the ends as
+      // accurate as the middle; two would visibly bend the overlay there.
+      var f1 = next && next.ok ? next : null
+      var f2 = f1 && i + 2 < points.length && points[i + 2] && points[i + 2].ok ? points[i + 2] : null
+      var b1 = prev && prev.ok ? prev : null
+      var b2 = b1 && i - 2 >= 0 && points[i - 2] && points[i - 2].ok ? points[i - 2] : null
+      if (f1 && f2 && f1.x !== p.x) slope = (-3 * p.y + 4 * f1.y - f2.y) / (2 * (f1.x - p.x))
+      else if (b1 && b2 && b1.x !== p.x) slope = (3 * p.y - 4 * b1.y + b2.y) / (2 * (p.x - b1.x))
+      else if (f1 && f1.x !== p.x) slope = (f1.y - p.y) / (f1.x - p.x)
+      else if (b1 && b1.x !== p.x) slope = (p.y - b1.y) / (p.x - b1.x)
+    }
+    var ok = p.ok && isFinite(slope)
+    out.push({ x: p.x, y: ok ? slope : NaN, t: p.x, ok: ok })
+  }
+  return out
+}

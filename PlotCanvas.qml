@@ -37,6 +37,8 @@ Item {
   // Lower limit of the shaded integral, and whether the user pinned it there.
   property real areaFrom: 0
   property bool areaBoundSet: false
+  // Shade the gap between the first two series instead of down to the axis.
+  property bool betweenMode: false
   readonly property bool snapped: snapKind !== ""
   readonly property bool curveTrace: kind === "polar" || kind === "parametric" || kind === "implicit"
   property color foreground: Color.foreground
@@ -324,6 +326,37 @@ Item {
     }
   }
 
+  // The band between two series over the integration bounds: out along the
+  // first curve, back along the second.
+  function fillBetween(ctx, ptsA, ptsB, color) {
+    if (!showArea || !isFinite(traceX)) return
+    var from = isFinite(areaFrom) ? areaFrom : 0
+    var lo = Math.min(from, traceX)
+    var hi = Math.max(from, traceX)
+    var n = Math.min(ptsA.length, ptsB.length)
+    var inside = []
+    for (var i = 0; i < n; i++) {
+      var pa = ptsA[i]
+      var pb = ptsB[i]
+      if (!pa || !pb || !pa.ok || !pb.ok) continue
+      if (pa.x < lo - 1e-12 || pa.x > hi + 1e-12) continue
+      inside.push({ x: pxX(pa.x), ya: pxY(pa.y), yb: pxY(pb.y) })
+    }
+    if (inside.length < 2) return
+    ctx.beginPath()
+    ctx.moveTo(inside[0].x, clampY(inside[0].ya))
+    var k
+    for (k = 1; k < inside.length; k++) ctx.lineTo(inside[k].x, clampY(inside[k].ya))
+    for (k = inside.length - 1; k >= 0; k--) ctx.lineTo(inside[k].x, clampY(inside[k].yb))
+    ctx.closePath()
+    ctx.fillStyle = css(color, 0.20)
+    ctx.fill()
+  }
+
+  function clampY(py) {
+    return Math.max(plotTop, Math.min(plotBottom, py))
+  }
+
   function fillPolarArea(ctx, points, color) {
     if (!isFinite(traceX)) return
     var originX = pxX(0)
@@ -535,7 +568,9 @@ Item {
       ctx.rect(root.plotLeft, root.plotTop, root.plotRight - root.plotLeft, root.plotBottom - root.plotTop)
       ctx.clip()
       var list = root.series || []
-      if (list.length > 0 && list[0].points)
+      if (root.betweenMode && list.length > 1 && list[0].points && list[1].points)
+        root.fillBetween(ctx, list[0].points, list[1].points, list[0].color || root.accent)
+      else if (list.length > 0 && list[0].points)
         root.fillSeries(ctx, list[0].points, list[0].color || root.accent)
       for (var i = 0; i < list.length; i++) {
         var s = list[i]
@@ -625,6 +660,7 @@ Item {
   onTanDyChanged: canvas.requestPaint()
   onSnapKindChanged: canvas.requestPaint()
   onAreaFromChanged: canvas.requestPaint()
+  onBetweenModeChanged: canvas.requestPaint()
   onAreaBoundSetChanged: canvas.requestPaint()
   onTracePlotXChanged: canvas.requestPaint()
   onTracePlotYChanged: canvas.requestPaint()

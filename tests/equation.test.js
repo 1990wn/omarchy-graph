@@ -483,3 +483,78 @@ test("snap targets come back in order, so stepping can walk them", function () {
   assert.ok(targets.length > 5)
   for (var i = 1; i < targets.length; i++) assert.ok(targets[i].t >= targets[i - 1].t)
 })
+
+function derivativeOf(source) {
+  const a = E.analyze(source)
+  const d = E.derivative(a.expressions[0].ast, a.independent)
+  const values = {}
+  a.params.forEach(function (p) { values[p.name] = p.value })
+  return { analysis: a, d: d, values: values }
+}
+
+test("symbolic derivatives match central differences", function () {
+  const sources = ["sin(x)", "cos(x)", "tan(x)", "exp(-x^2)", "sqrt(x)", "ln(x)", "x^3 - x",
+    "sin(x)*cos(x)", "sin(x)/x", "atan(x)", "tanh(x)", "log10(x)", "cbrt(x)", "sinc(x)",
+    "sec(x)", "cot(x)", "x^x", "2^x", "sin(x^2)", "exp(x)*ln(x)", "x^4",
+    "sum(n=1 to 5, sin(n*x))"]
+  sources.forEach(function (source) {
+    const s = derivativeOf(source)
+    assert.ok(s.d, "no derivative for " + source)
+    const ind = s.analysis.independent
+    const at = function (x) {
+      const env = Object.assign({}, s.values)
+      env[ind] = x
+      return E.evaluate(s.analysis.expressions[0].ast, env)
+    }
+    ;[0.3, 0.7, 1.1, 1.9, 2.6].forEach(function (x) {
+      const h = 1e-6
+      const numeric = (at(x + h) - at(x - h)) / (2 * h)
+      const env = Object.assign({}, s.values)
+      env[ind] = x
+      const symbolic = E.evaluate(s.d, env)
+      if (!isFinite(numeric) || !isFinite(symbolic)) return
+      const scale = Math.max(1, Math.abs(numeric))
+      assert.ok(Math.abs(symbolic - numeric) / scale < 1e-6,
+        source + " at " + x + ": " + symbolic + " vs " + numeric)
+    })
+  })
+})
+
+test("the derivative folds away the identities it creates", function () {
+  assert.equal(E.pretty(derivativeOf("sin(x)").d), "cos(x)")
+  assert.equal(E.pretty(derivativeOf("x^2").d), "2x")
+  assert.equal(E.pretty(derivativeOf("ln(x)").d), "1 / x")
+  assert.equal(E.pretty(derivativeOf("x^x").d), "x^x · (ln(x) + 1)")
+})
+
+test("no symbolic rule yields null rather than a wrong answer", function () {
+  assert.equal(derivativeOf("min(x, 2)").d, null)
+  assert.equal(derivativeOf("hypot(x, 2)").d, null)
+})
+
+test("a constant differentiates to zero and a parameter is held constant", function () {
+  const s = derivativeOf("a*x")
+  const env = { x: 3, a: 5 }
+  assert.equal(E.evaluate(s.d, env), 5)
+})
+
+test("area between two series matches the exact integral", function () {
+  const a = E.analyze("sin(x); cos(x)")
+  const series = a.expressions.map(function (e) {
+    return P.sampleSeries(E.evaluate, e.ast, a.independent, a.params, {}, -7, 7, 1600)
+  })
+  const got = P.areaBetween(series[0], series[1], Math.PI / 4, 5 * Math.PI / 4)
+  assert.ok(Math.abs(got - 2 * Math.SQRT2) < 1e-3, "got " + got)
+  assert.ok(Math.abs(got + P.areaBetween(series[0], series[1], 5 * Math.PI / 4, Math.PI / 4)) < 1e-12)
+})
+
+test("the numeric derivative fallback tracks the real slope", function () {
+  const a = E.analyze("sin(x)")
+  const pts = P.sampleSeries(E.evaluate, a.expressions[0].ast, "x", a.params, {}, -7, 7, 1600)
+  const d = P.derivativePoints(pts)
+  assert.equal(d.length, pts.length)
+  d.forEach(function (p) {
+    if (!p.ok) return
+    assert.ok(Math.abs(p.y - Math.cos(p.x)) < 1e-3)
+  })
+})

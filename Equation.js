@@ -950,6 +950,234 @@ function callFunc(name, args) {
   }
 }
 
+// --- Symbolic derivative ----------------------------------------------------
+//
+// Builders that fold as they go. Differentiation otherwise produces towers of
+// `+ 0` and `* 1` that are correct and unreadable, and the result is shown to
+// the user and sampled like any other expression.
+
+function mkNum(v) {
+  return { type: "num", value: v }
+}
+
+function isNum(ast, v) {
+  if (!ast || ast.type !== "num") return false
+  return v === undefined || ast.value === v
+}
+
+function mkNeg(a) {
+  if (!a) return null
+  if (isNum(a)) return mkNum(-a.value)
+  if (a.type === "uop" && a.op === "-") return a.arg
+  return { type: "uop", op: "-", arg: a }
+}
+
+function mkAdd(a, b) {
+  if (!a || !b) return null
+  if (isNum(a, 0)) return b
+  if (isNum(b, 0)) return a
+  if (isNum(a) && isNum(b)) return mkNum(a.value + b.value)
+  if (b.type === "uop" && b.op === "-") return mkSub(a, b.arg)
+  return { type: "op", op: "+", left: a, right: b }
+}
+
+function mkSub(a, b) {
+  if (!a || !b) return null
+  if (isNum(b, 0)) return a
+  if (isNum(a, 0)) return mkNeg(b)
+  if (isNum(a) && isNum(b)) return mkNum(a.value - b.value)
+  return { type: "op", op: "-", left: a, right: b }
+}
+
+function astEqual(a, b) {
+  if (!a || !b) return false
+  if (a.type !== b.type) return false
+  if (a.type === "num") return a.value === b.value
+  if (a.type === "const" || a.type === "var" || a.type === "param") return a.name === b.name
+  if (a.type === "uop") return a.op === b.op && astEqual(a.arg, b.arg)
+  if (a.type === "op") return a.op === b.op && astEqual(a.left, b.left) && astEqual(a.right, b.right)
+  if (a.type === "call") {
+    if (a.name !== b.name || a.args.length !== b.args.length) return false
+    for (var i = 0; i < a.args.length; i++) {
+      if (!astEqual(a.args[i], b.args[i])) return false
+    }
+    return true
+  }
+  if (a.type === "sum")
+    return a.index === b.index && astEqual(a.from, b.from) && astEqual(a.to, b.to) && astEqual(a.body, b.body)
+  return false
+}
+
+function mkMul(a, b) {
+  if (!a || !b) return null
+  if (isNum(a, 0) || isNum(b, 0)) return mkNum(0)
+  // Pull a negation out front rather than leaving `f · -(g)`.
+  if (a.type === "uop" && a.op === "-") return mkNeg(mkMul(a.arg, b))
+  if (b.type === "uop" && b.op === "-") return mkNeg(mkMul(a, b.arg))
+  if (isNum(a, 1)) return b
+  if (isNum(b, 1)) return a
+  if (isNum(a, -1)) return mkNeg(b)
+  if (isNum(b, -1)) return mkNeg(a)
+  if (isNum(a) && isNum(b)) return mkNum(a.value * b.value)
+  // Keep any constant on the left so `2*cos(x)` reads the usual way round.
+  if (isNum(b) && !isNum(a)) return { type: "op", op: "*", left: b, right: a }
+  return { type: "op", op: "*", left: a, right: b }
+}
+
+function mkDiv(a, b) {
+  if (!a || !b) return null
+  if (isNum(a, 0)) return mkNum(0)
+  if (astEqual(a, b)) return mkNum(1)
+  if (isNum(b, 1)) return a
+  if (isNum(b, -1)) return mkNeg(a)
+  if (isNum(a) && isNum(b) && b.value !== 0) return mkNum(a.value / b.value)
+  return { type: "op", op: "/", left: a, right: b }
+}
+
+function mkPow(a, b) {
+  if (!a || !b) return null
+  if (isNum(b, 0)) return mkNum(1)
+  if (isNum(b, 1)) return a
+  if (isNum(a) && isNum(b)) return mkNum(Math.pow(a.value, b.value))
+  return { type: "op", op: "^", left: a, right: b }
+}
+
+function mkCall(name, args) {
+  for (var i = 0; i < args.length; i++) {
+    if (!args[i]) return null
+  }
+  return { type: "call", name: name, args: args }
+}
+
+function dependsOn(ast, name) {
+  if (!ast) return false
+  if (ast.type === "var" || ast.type === "param") return ast.name === name
+  if (ast.type === "uop") return dependsOn(ast.arg, name)
+  if (ast.type === "op") return dependsOn(ast.left, name) || dependsOn(ast.right, name)
+  if (ast.type === "call") {
+    for (var i = 0; i < ast.args.length; i++) {
+      if (dependsOn(ast.args[i], name)) return true
+    }
+    return false
+  }
+  if (ast.type === "sum")
+    return dependsOn(ast.from, name) || dependsOn(ast.to, name) || dependsOn(ast.body, name)
+  return false
+}
+
+// d/dname of one function call, given its argument and that argument's
+// derivative. null means "no rule here", which propagates up.
+function derivativeOfCall(name, args, u, du) {
+  switch (name) {
+  case "sin": return mkMul(mkCall("cos", [u]), du)
+  case "cos": return mkNeg(mkMul(mkCall("sin", [u]), du))
+  case "tan": return mkDiv(du, mkPow(mkCall("cos", [u]), mkNum(2)))
+  case "asin": return mkDiv(du, mkCall("sqrt", [mkSub(mkNum(1), mkPow(u, mkNum(2)))]))
+  case "acos": return mkNeg(mkDiv(du, mkCall("sqrt", [mkSub(mkNum(1), mkPow(u, mkNum(2)))])))
+  case "atan": return mkDiv(du, mkAdd(mkNum(1), mkPow(u, mkNum(2))))
+  case "sinh": return mkMul(mkCall("cosh", [u]), du)
+  case "cosh": return mkMul(mkCall("sinh", [u]), du)
+  case "tanh": return mkDiv(du, mkPow(mkCall("cosh", [u]), mkNum(2)))
+  case "asinh": return mkDiv(du, mkCall("sqrt", [mkAdd(mkPow(u, mkNum(2)), mkNum(1))]))
+  case "acosh": return mkDiv(du, mkCall("sqrt", [mkSub(mkPow(u, mkNum(2)), mkNum(1))]))
+  case "atanh": return mkDiv(du, mkSub(mkNum(1), mkPow(u, mkNum(2))))
+  case "exp": return mkMul(mkCall("exp", [u]), du)
+  case "ln": return mkDiv(du, u)
+  case "log10": case "lg": return mkDiv(du, mkMul(u, mkNum(Math.LN10)))
+  case "log2": case "lb": return mkDiv(du, mkMul(u, mkNum(Math.LN2)))
+  case "sqrt": return mkDiv(du, mkMul(mkNum(2), mkCall("sqrt", [u])))
+  case "cbrt": return mkDiv(du, mkMul(mkNum(3), mkPow(mkCall("cbrt", [u]), mkNum(2))))
+  case "abs": return mkMul(mkCall("sign", [u]), du)
+  case "sign": case "floor": case "ceil": case "round": case "trunc": return mkNum(0)
+  case "frac": return du
+  case "sinc":
+    // (cos u)/u - (sin u)/u^2, times du
+    return mkMul(mkSub(mkDiv(mkCall("cos", [u]), u),
+                       mkDiv(mkCall("sin", [u]), mkPow(u, mkNum(2)))), du)
+  case "sec": return mkMul(mkMul(mkCall("sec", [u]), mkCall("tan", [u])), du)
+  case "csc": return mkNeg(mkMul(mkMul(mkCall("csc", [u]), mkCall("cot", [u])), du))
+  case "cot": return mkNeg(mkDiv(du, mkPow(mkCall("sin", [u]), mkNum(2))))
+  case "sech": return mkNeg(mkMul(mkMul(mkCall("sech", [u]), mkCall("tanh", [u])), du))
+  case "csch": return mkNeg(mkMul(mkMul(mkCall("csch", [u]), mkCall("coth", [u])), du))
+  case "coth": return mkNeg(mkDiv(du, mkPow(mkCall("sinh", [u]), mkNum(2))))
+  case "deg": return mkMul(mkNum(180 / Math.PI), du)
+  case "rad": return mkMul(mkNum(Math.PI / 180), du)
+  default: return null
+  }
+}
+
+// d(ast)/d(name), or null where no rule applies (min, max, hypot, atan2, %,
+// and anything whose exponent or log base is itself a function of name in a
+// way the rules below do not cover).
+function derivative(ast, name) {
+  if (!ast) return null
+  if (ast.type === "num" || ast.type === "const") return mkNum(0)
+  if (ast.type === "var" || ast.type === "param")
+    return mkNum(ast.name === name ? 1 : 0)
+  if (ast.type === "uop")
+    return ast.op === "-" ? mkNeg(derivative(ast.arg, name)) : derivative(ast.arg, name)
+
+  if (ast.type === "op") {
+    var dl = derivative(ast.left, name)
+    var dr = derivative(ast.right, name)
+    if (!dl || !dr) return null
+    if (ast.op === "+") return mkAdd(dl, dr)
+    if (ast.op === "-") return mkSub(dl, dr)
+    if (ast.op === "*") return mkAdd(mkMul(dl, ast.right), mkMul(ast.left, dr))
+    if (ast.op === "/") {
+      var top = mkSub(mkMul(dl, ast.right), mkMul(ast.left, dr))
+      return mkDiv(top, mkPow(ast.right, mkNum(2)))
+    }
+    if (ast.op === "^") {
+      var constExp = !dependsOn(ast.right, name)
+      if (constExp) {
+        // n * u^(n-1) * u'
+        var lowered = mkPow(ast.left, mkSub(ast.right, mkNum(1)))
+        return mkMul(mkMul(ast.right, lowered), dl)
+      }
+      if (!dependsOn(ast.left, name)) {
+        // a^v * ln(a) * v'
+        return mkMul(mkMul(ast, mkCall("ln", [ast.left])), dr)
+      }
+      // u^v * (v' ln u + v u' / u)
+      var inner = mkAdd(mkMul(dr, mkCall("ln", [ast.left])),
+                        mkDiv(mkMul(ast.right, dl), ast.left))
+      return mkMul(ast, inner)
+    }
+    return null
+  }
+
+  if (ast.type === "call") {
+    if (ast.name === "log" && ast.args.length === 2) {
+      if (dependsOn(ast.args[1], name)) return null
+      var dArg = derivative(ast.args[0], name)
+      if (!dArg) return null
+      return mkDiv(dArg, mkMul(ast.args[0], mkCall("ln", [ast.args[1]])))
+    }
+    if (ast.name === "log" && ast.args.length === 1) {
+      var dLog = derivative(ast.args[0], name)
+      return dLog ? mkDiv(dLog, ast.args[0]) : null
+    }
+    if (ast.name === "pow" && ast.args.length === 2)
+      return derivative({ type: "op", op: "^", left: ast.args[0], right: ast.args[1] }, name)
+    if (ast.args.length !== 1) return null
+    var du = derivative(ast.args[0], name)
+    if (!du) return null
+    return derivativeOfCall(ast.name, ast.args, ast.args[0], du)
+  }
+
+  if (ast.type === "sum") {
+    // The index is bound by the sum and the limits must not move with name,
+    // or the term count itself would depend on it.
+    if (dependsOn(ast.from, name) || dependsOn(ast.to, name)) return null
+    var dBody = derivative(ast.body, name)
+    if (!dBody) return null
+    return { type: "sum", index: ast.index, from: ast.from, to: ast.to, body: dBody }
+  }
+
+  return null
+}
+
 // Math functions that are exactly their callFunc case, so a compiled call can
 // jump straight to them instead of walking the string switch every sample.
 var DIRECT_UNARY = {

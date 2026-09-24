@@ -55,6 +55,14 @@ caught (**ZERO**, **PEAK**, **CROSS**) in the readout. **←** / **→** walk th
 tracer from one feature to the next, so you can survey a function without
 aiming at it.
 
+**d/dx** overlays the derivative as another series. It is differentiated
+symbolically — `sin(x)` gives `cos(x)`, `x^x` gives `x^x · (ln(x) + 1)` — so
+the curve and the `m` readout are exact rather than a difference of neighbouring
+samples; equations with no rule (`min`, `max`, `hypot`) fall back to central
+differences. With **BETWEEN** on, the shading and `A` measure the gap between
+the first two series instead of the drop to the axis, which with the crossings
+snapped is the usual "area between two curves".
+
 The area runs from the origin by default. Space (or the pin next to **FROM**,
 or shift-click on the plot) pins the lower limit at the tracer instead, and
 `x` clears it; the limit shows up as a dashed `a` rule and in the readout. With
@@ -84,7 +92,8 @@ overlay a second series are supported. Functions include `sin` `cos` `tan`
 - `+` / `-` zoom, `[` / `]` pan, `0` reset, `a` toggles Y auto-scale
 - `←` / `→` step the tracer between features, space pins the area's lower
   limit there, `x` clears it
-- `t` and `s` toggle the tangent and the shaded area
+- `t` and `s` toggle the tangent and the shaded area, `d` the derivative,
+  `b` the between-curves mode
 - Tick labels switch to π, π/2, 2π when the window is a trig range
 
 The first series is the theme accent. Further series pick cyan / magenta /
