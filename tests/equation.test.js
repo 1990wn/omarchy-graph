@@ -57,24 +57,49 @@ test("named parameters a*sin(b*x+c)", function () {
   assert.ok(Math.abs(y - 2) < 1e-10)
 })
 
-test("x^2 exponent is tunable", function () {
+test("numeric exponents stay literals", function () {
   const a = E.analyze("x^2")
   assert.equal(a.ok, true)
-  assert.equal(a.params[0].value, 2)
+  assert.equal(a.params.length, 0)
+  assert.equal(E.evaluate(a.expressions[0].ast, { x: 3 }), 9)
+  assert.equal(E.evaluate(a.expressions[0].ast, { x: -3 }), 9)
+})
+
+test("x^a is a live exponent", function () {
+  const a = E.analyze("x^a")
+  assert.equal(a.ok, true)
+  assert.equal(names(a), "a")
+  assert.equal(a.params[0].kind, "symbol")
   assert.equal(E.evaluate(a.expressions[0].ast, { x: 3, a: 2 }), 9)
-  assert.equal(E.evaluate(a.expressions[0].ast, { x: 3, a: 3 }), 27)
+})
+
+test("ripple surface has no exponent sliders", function () {
+  const a = E.analyze("sin(sqrt(x^2 + y^2))")
+  assert.equal(a.ok, true, a.error)
+  assert.equal(a.kind, "surface")
+  assert.equal(a.params.length, 0)
+})
+
+test("1*x^3 - x only sliders the 1", function () {
+  const a = E.analyze("1 * x^3 - x")
+  assert.equal(a.ok, true)
+  assert.equal(names(a), "a")
+  assert.equal(a.params[0].value, 1)
+  assert.equal(E.evaluate(a.expressions[0].ast, { x: -1, a: 1 }), 0)
+  assert.equal(E.evaluate(a.expressions[0].ast, { x: -1.5, a: 1 }), -1.875)
+  assert.equal(E.evaluate(a.expressions[0].ast, { x: -1.5, a: 2 }), -5.25)
 })
 
 test("unary minus binds weaker than power", function () {
   const a = E.analyze("-x^2")
   assert.equal(a.ok, true)
-  const y = E.evaluate(a.expressions[0].ast, { x: 3, a: 2 })
+  const y = E.evaluate(a.expressions[0].ast, { x: 3 })
   assert.equal(y, -9)
 })
 
 test("2x^2 is 2*(x^2)", function () {
   const a = E.analyze("2x^2")
-  const y = E.evaluate(a.expressions[0].ast, { x: 3, a: 2, b: 2 })
+  const y = E.evaluate(a.expressions[0].ast, { x: 3, a: 2 })
   assert.equal(y, 18)
 })
 
@@ -202,7 +227,7 @@ test("z = x^2 + y^2 is a 3d surface", function () {
   assert.equal(a.independent, "x")
   assert.equal(a.independent2, "y")
   assert.ok(names(a).split(",").indexOf("y") === -1)
-  const z = E.evaluate(a.expressions[0].ast, { x: 2, y: 1, a: 2, b: 2 })
+  const z = E.evaluate(a.expressions[0].ast, { x: 2, y: 1 })
   assert.equal(z, 5)
 })
 
@@ -213,6 +238,28 @@ test("sin(x)*cos(y) is 3d without an explicit z", function () {
   assert.equal(a.params.length, 0)
   const z = E.evaluate(a.expressions[0].ast, { x: Math.PI / 2, y: 0 })
   assert.ok(Math.abs(z - 1) < 1e-10)
+})
+
+test("x^2 + y^2 = 1 is implicit, not a surface", function () {
+  const a = E.analyze("x^2 + y^2 = 1")
+  assert.equal(a.ok, true, a.error)
+  assert.equal(a.kind, "implicit")
+  assert.equal(a.dim, 2)
+  const F = E.evaluate(a.expressions[0].ast, { x: 1, y: 0, a: 1 })
+  assert.ok(Math.abs(F) < 1e-8)
+  const pts = P.sampleImplicit(E.evaluate, a.expressions[0].ast, a.params, { a: 1 }, -1.5, 1.5, -1.5, 1.5, 40)
+  var near = false
+  for (var i = 0; i < pts.length; i++) {
+    if (!pts[i].ok) continue
+    if (Math.abs(pts[i].x * pts[i].x + pts[i].y * pts[i].y - 1) < 0.08) near = true
+  }
+  assert.equal(near, true)
+})
+
+test("y = x^2 stays cartesian", function () {
+  const a = E.analyze("y = x^2")
+  assert.equal(a.kind, "cartesian")
+  assert.equal(a.dim, 2)
 })
 
 test("sin(x) stays 2d", function () {
@@ -256,6 +303,52 @@ test("cartesian area under y=1 from 0 to 2 is 2", function () {
   assert.ok(Math.abs(P.areaCartesian(pts, 0, 2) - 2) < 1e-9)
 })
 
+test("tan(x) breaks at the asymptote", function () {
+  const a = E.analyze("tan(x)")
+  const pts = P.sampleSeries(E.evaluate, a.expressions[0].ast, "x", a.params, {}, 1.0, 2.1, 80)
+  var broke = false
+  for (var i = 1; i < pts.length; i++) {
+    if (pts[i - 1].ok && pts[i].ok && pts[i - 1].x < Math.PI / 2 && pts[i].x > Math.PI / 2) {
+      assert.equal(P.shouldBreak(pts[i - 1], pts[i], -20, 20), true)
+      broke = true
+    }
+  }
+  assert.equal(broke, true)
+})
+
+test("1/x breaks at the origin", function () {
+  const a = E.analyze("1/x")
+  const vals = { a: 1 }
+  const pts = P.sampleSeries(E.evaluate, a.expressions[0].ast, "x", a.params, vals, -2, 2, 81)
+  var left = null
+  var right = null
+  for (var i = 0; i < pts.length; i++) {
+    if (!pts[i].ok) continue
+    if (pts[i].x < 0) left = pts[i]
+    if (pts[i].x > 0 && !right) right = pts[i]
+  }
+  assert.ok(left && right)
+  assert.equal(P.shouldBreak(left, right, -10, 10), true)
+})
+
+test("x^3 - x does not break across the origin", function () {
+  const a = E.analyze("x^3 - x")
+  const pts = P.sampleSeries(E.evaluate, a.expressions[0].ast, "x", a.params, {}, -2, 2, 80)
+  for (var i = 1; i < pts.length; i++) {
+    if (pts[i - 1].ok && pts[i].ok && pts[i - 1].x < 0 && pts[i].x > 0)
+      assert.equal(P.shouldBreak(pts[i - 1], pts[i], -8, 8), false)
+  }
+})
+
+test("fitCartesianHalf shrinks x^2 from ±10 to a readable window", function () {
+  const a = E.analyze("x^2")
+  const vals = { a: 2 }
+  const pts = P.sampleSeries(E.evaluate, a.expressions[0].ast, "x", a.params, vals, -10, 10, 200)
+  const half = P.fitCartesianHalf(pts, 0, 10)
+  assert.ok(half < 6)
+  assert.ok(half > 2)
+})
+
 test("wheel zoom in shrinks the window", function () {
   assert.ok(P.zoomFactorFromWheel(120, 0) < 1)
   assert.ok(P.zoomFactorFromWheel(-120, 0) > 1)
@@ -268,4 +361,83 @@ test("top-down view does not flatten the xy plane", function () {
   const c = P.projectPoint(-1, 0, 0, cam)
   assert.ok(Math.hypot(a.x - b.x, a.y - b.y) > 20)
   assert.ok(Math.hypot(a.x - c.x, a.y - c.y) > 20)
+})
+
+function snapSetup(source, xMin, xMax, count) {
+  const a = E.analyze(source)
+  const values = {}
+  a.params.forEach(function (p) { values[p.name] = p.value })
+  const series = a.expressions.map(function (e) {
+    return { points: P.sampleSeries(E.evaluate, e.ast, a.independent, a.params, values, xMin, xMax, count || 800) }
+  })
+  function fn(index) {
+    const env = P.envFrom(a.independent, 0, a.params, values)
+    return function (t) {
+      env[a.independent] = t
+      return E.evaluate(a.expressions[index].ast, env)
+    }
+  }
+  function refine(target) {
+    if (target.kind === "peak") return P.refineExtremum(fn(target.series), target.a, target.b, target.dir)
+    if (target.kind === "cross") {
+      const f = fn(target.series)
+      const g = fn(target.other)
+      return P.refineRoot(function (t) { return f(t) - g(t) }, target.a, target.b)
+    }
+    return P.refineRoot(fn(target.series), target.a, target.b)
+  }
+  return { series: series, refine: refine }
+}
+
+test("snap targets find the zeros of sin(x) exactly", function () {
+  const s = snapSetup("sin(x)", -7, 7)
+  const zeros = P.snapTargets(s.series, false, 4)
+    .filter(function (t) { return t.kind === "zero" })
+    .map(s.refine)
+  assert.equal(zeros.length, 5)
+  zeros.forEach(function (z) {
+    assert.ok(Math.abs(z - Math.round(z / Math.PI) * Math.PI) < 1e-12)
+  })
+})
+
+test("snap targets find a peak that lands between two samples", function () {
+  const s = snapSetup("exp(-x^2)", -5, 5)
+  const peaks = P.snapTargets(s.series, false, 1).filter(function (t) { return t.kind === "peak" })
+  assert.equal(peaks.length, 1)
+  assert.ok(Math.abs(s.refine(peaks[0])) < 1e-6)
+})
+
+test("snap targets find where two series cross", function () {
+  const s = snapSetup("sin(x); cos(x)", -7, 7)
+  const crosses = P.snapTargets(s.series, false, 4)
+    .filter(function (t) { return t.kind === "cross" })
+    .map(s.refine)
+  assert.ok(crosses.length >= 4)
+  crosses.forEach(function (x) {
+    assert.ok(Math.abs(Math.sin(x) - Math.cos(x)) < 1e-9)
+  })
+})
+
+test("a pole is not mistaken for a zero crossing", function () {
+  const s = snapSetup("1/x", -6, 6)
+  const zeros = P.snapTargets(s.series, false, 8).filter(function (t) { return t.kind === "zero" })
+  assert.equal(zeros.length, 0)
+})
+
+test("nearestSnap only catches targets inside the tolerance", function () {
+  const s = snapSetup("sin(x)", -7, 7)
+  const targets = P.snapTargets(s.series, false, 4)
+  assert.ok(Math.abs(P.nearestSnap(targets, 3.0, 0.25).t - Math.PI) < 0.01)
+  assert.equal(P.nearestSnap(targets, 2.0, 0.2), null)
+})
+
+test("polar zeros land on the petal edges of r = sin(3t)", function () {
+  const a = E.analyze("r = sin(3t)")
+  const pts = P.samplePolar(E.evaluate, a.expressions[0].ast, a.independent, a.params, {}, 0, Math.PI * 2, 900)
+  const targets = P.snapTargets([{ points: pts }], true, 2).filter(function (t) { return t.kind === "zero" })
+  assert.ok(targets.length >= 6)
+  targets.forEach(function (t) {
+    const k = Math.round(t.t / (Math.PI / 3))
+    assert.ok(Math.abs(t.t - k * Math.PI / 3) < 1e-3)
+  })
 })

@@ -35,6 +35,8 @@ sin(x)*cos(y)
 r = 1 + cos(t)
 r = sin(3t)
 x = cos(t); y = sin(3t)
+x^2 + y^2 = 1
+x^2 - y^2 = 1
 ```
 
 The index (`n`) is bound by the sum, not a slider. The upper limit becomes an
@@ -42,9 +44,19 @@ integer **N** slider so you can add terms live; coefficients in the body still
 become ordinary sliders (`1.5` → `a`).
 
 `r = ...` is polar (θ or `t` is the angle). `x = ...; y = ...` (or a comma) is
-parametric. The tracer walks the parameter; a dashed tangent and a shaded area
-to the tracer update live (`m` and `A` in the readout). Play (next to reset)
-sweeps the first coefficient, or the tracer if there isn't one.
+parametric. An equation in both `x` and `y` with `=`, like `x^2 + y^2 = 1`,
+is an implicit curve. The tracer walks the parameter; a dashed tangent and a shaded area
+to the tracer update live (`m` and `A` in the readout). **TANGENT** and
+**AREA** toggles turn those off. The tracer snaps to the points worth landing
+on — where the curve crosses the axis, where it turns around, and where two
+series meet — so an area runs to an exact boundary rather than to the nearest
+sample. A caught tracer turns the alert color, grows a ring, and names what it
+caught (**ZERO**, **PEAK**, **CROSS**) in the readout. Each slider has a play
+button on the right:
+press it and that slider starts sweeping from where it sits, press it again to
+stop. The play button in the zoom row does the same for zoom, so the plot
+zooms in and back out on its own. Run as many at once as you like — touching a
+slider only stops that one.
 
 If both `x` and `y` appear (or the left-hand side is `z`), the plot becomes a
 3D surface. Drag to orbit (elevation goes from −90° to 90°, so you can look

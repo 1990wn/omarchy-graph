@@ -46,7 +46,11 @@ Panel {
     { value: "r = 1 + cos(t)", label: "cardioid" },
     { value: "r = sin(3t)", label: "3-rose" },
     { value: "x = cos(t); y = sin(3t)", label: "Lissajous" },
-    { value: "x = cos(t); y = sin(t)", label: "circle" }
+    { value: "x = cos(t); y = sin(t)", label: "circle" },
+    { value: "x^2 + y^2 = 1", label: "circle =" },
+    { value: "x^2 - y^2 = 1", label: "hyperbola" },
+    { value: "y^2 = x^3 - x", label: "elliptic" },
+    { value: "sin(x)*sin(y) = 0.3", label: "implicit sin" }
   ]
 
   property string equationText: "sin(x)"
@@ -74,8 +78,18 @@ Panel {
   property string parseError: ""
   property bool loadingConfig: false
   property bool playing: false
-  property int playDir: 1
-  property string playKey: ""
+  readonly property real playSeconds: 4
+  // name -> { phase, dir } for every slider currently sweeping.
+  property var playAnim: ({})
+  property bool applyingExample: false
+  property bool showTangent: true
+  property bool showArea: true
+  property int sliderEdits: 0
+
+  function noteSliderFocus(on) {
+    sliderEdits += on ? 1 : -1
+    if (sliderEdits < 0) sliderEdits = 0
+  }
 
   readonly property real xMin: xCenter - xHalf
   readonly property real xMax: xCenter + xHalf
@@ -86,12 +100,31 @@ Panel {
   readonly property var traceYs: computeTrace(liveTraceX, analysis, paramValues, series)
   readonly property bool is3d: analysis && analysis.dim === 3
   readonly property string plotKind: analysis && analysis.kind ? analysis.kind : "cartesian"
-  readonly property bool isCurve: plotKind === "polar" || plotKind === "parametric"
+  readonly property bool isCurve: plotKind === "polar" || plotKind === "parametric" || plotKind === "implicit"
   readonly property real tMin: analysis && isFinite(analysis.tMin) ? analysis.tMin : 0
   readonly property real tMax: analysis && isFinite(analysis.tMax) ? analysis.tMax : Math.PI * 2
   readonly property real traceMin: isCurve ? tMin : xMin
-  readonly property real traceMax: isCurve ? tMax : xMax
+  readonly property real traceMax: {
+    if (plotKind === "implicit") {
+      var pts = series.length && series[0] ? series[0].points : null
+      var mt = 1
+      if (pts) {
+        for (var i = 0; i < pts.length; i++) {
+          if (pts[i] && isFinite(pts[i].t) && pts[i].t > mt) mt = pts[i].t
+        }
+      }
+      return mt
+    }
+    return isCurve ? tMax : xMax
+  }
   readonly property var geom: geometryAt(liveTraceX, series)
+  // Recomputing mid-sweep would cost a frame and nothing snaps while a slider
+  // is driving the tracer, so the targets go away until the sweep stops.
+  readonly property var snapTargets: (playing || is3d || plotKind === "implicit")
+    ? []
+    : Plot.snapTargets(series, plotKind === "polar", Math.max(1e-9, yMax - yMin))
+  readonly property real snapTolerance: (traceMax - traceMin) * 0.012
+  readonly property string snapKind: Plot.snapKindAt(snapTargets, liveTraceX, snapTolerance * 0.02)
 
   function open() {
     configFile.reload()
@@ -117,7 +150,7 @@ Panel {
   }
 
   function close() {
-    playing = false
+    stopAllAnimating()
     setCenterHoverRevealSuppressed(false)
     persist()
     root.controller.hide()
@@ -160,6 +193,42 @@ Panel {
 
   function formatValue(v) {
     return Plot.formatNumber(v)
+  }
+
+  // The value of a series at one point of the independent variable, as a plain
+  // function, so the refiners can hunt for the exact root or turning point.
+  function seriesFn(index) {
+    if (!analysis || !analysis.ok) return null
+    var expr = analysis.expressions[index]
+    if (!expr || !expr.ast) return null
+    var ind = analysis.independent || "x"
+    var env = Plot.envFrom(ind, 0, paramList, paramValues)
+    return function(t) {
+      env[ind] = t
+      return Equation.evaluate(expr.ast, env)
+    }
+  }
+
+  function refineSnap(target) {
+    var f = seriesFn(target.series)
+    if (!f) return target.t
+    var refined = NaN
+    if (target.kind === "peak") {
+      refined = Plot.refineExtremum(f, target.a, target.b, target.dir)
+    } else if (target.kind === "cross") {
+      var g = seriesFn(target.other)
+      if (g) refined = Plot.refineRoot(function(t) { return f(t) - g(t) }, target.a, target.b)
+    } else {
+      refined = Plot.refineRoot(f, target.a, target.b)
+    }
+    // A refiner that cannot bracket the feature hands back the grid estimate.
+    return isFinite(refined) ? refined : target.t
+  }
+
+  function snapTrace(t) {
+    var hit = Plot.nearestSnap(snapTargets, t, snapTolerance)
+    if (!hit) return t
+    return Plot.clamp(refineSnap(hit), traceMin, traceMax)
   }
 
   function setParam(name, value) {
@@ -216,26 +285,40 @@ Panel {
       return
     }
     parseError = ""
-    equationText = text
     analysis = next
+    var incoming = String(text)
+    var sameText = incoming === String(equationText)
     var values = {}
     for (var i = 0; i < next.params.length; i++) {
-      var name = next.params[i].name
-      var prev = paramValues[name]
-      values[name] = prev !== undefined && isFinite(prev) ? prev : next.params[i].value
+      var spec = next.params[i]
+      var prev = paramValues[spec.name]
+      // Keep slider positions when reloading the same equation or when the
+      // name is a typed letter. Fresh literals in new text take the number
+      // from the formula so leftover `a` cannot turn x^2 into x^3.
+      var keep = prev !== undefined && isFinite(prev)
+        && (loadingConfig || sameText || spec.kind === "symbol")
+      values[spec.name] = keep ? prev : spec.value
     }
     paramValues = values
+    equationText = incoming
     paramList = next.params.slice()
-    playing = false
+    pruneAnimating()
     if (resetView) {
       xCenter = next.xCenter
       xHalf = next.xHalf
       yAuto = true
-      pinnedTraceX = next.kind === "polar" || next.kind === "parametric"
+      pinnedTraceX = next.kind === "polar" || next.kind === "parametric" || next.kind === "implicit"
         ? (isFinite(next.tMin) ? next.tMin : 0)
         : next.xCenter
     }
     resample()
+    if (resetView && (next.kind || "cartesian") === "cartesian" && series.length && series[0]) {
+      var fitted = Plot.fitCartesianHalf(series[0].points, xCenter, xHalf)
+      if (fitted < xHalf - 1e-6) {
+        xHalf = fitted
+        resample()
+      }
+    }
     pinnedTraceX = Plot.clamp(pinnedTraceX, traceMin, traceMax)
     persistSoon()
   }
@@ -248,7 +331,7 @@ Panel {
     }
     if (analysis.dim === 3) {
       series = []
-      var n = 32
+      var n = playing ? 22 : 32
       var ast = analysis.expressions[0].ast
       var mesh = Plot.sampleSurface(Equation.evaluate, ast, analysis.independent, analysis.independent2,
                                     paramList, paramValues, xMin, xMax, xMin, xMax, n)
@@ -261,7 +344,7 @@ Panel {
       return
     }
     surface = null
-    var count = Math.max(280, Math.round((plot.width || 640) * 1.6))
+    var count = Math.max(playing ? 200 : 280, Math.round((plot.width || 640) * (playing ? 0.7 : 1.6)))
     var list = []
     var kind = analysis.kind || "cartesian"
     if (kind === "polar") {
@@ -272,6 +355,21 @@ Panel {
       var paraPts = Plot.sampleParametric(Equation.evaluate, analysis.expressions[0].ast, analysis.expressions[1].ast,
                                           analysis.independent, paramList, paramValues, tMin, tMax, count)
       list.push({ points: paraPts, color: seriesColor(0), pretty: analysis.pretty })
+    } else if (kind === "implicit") {
+      if (yAuto) {
+        yCenter = 0
+        yHalf = xHalf
+        yMin = -xHalf
+        yMax = xHalf
+      } else {
+        yMin = yCenter - yHalf
+        yMax = yCenter + yHalf
+      }
+      for (var im = 0; im < analysis.expressions.length; im++) {
+        var implPts = Plot.sampleImplicit(Equation.evaluate, analysis.expressions[im].ast,
+                                          paramList, paramValues, xMin, xMax, yMin, yMax, playing ? 44 : 80)
+        list.push({ points: implPts, color: seriesColor(im), pretty: analysis.expressions[im].pretty })
+      }
     } else {
       for (var i = 0; i < analysis.expressions.length; i++) {
         var expr = analysis.expressions[i].ast
@@ -280,7 +378,7 @@ Panel {
       }
     }
     series = list
-    if (kind === "polar" || kind === "parametric") {
+    if (kind === "polar" || kind === "parametric" || kind === "implicit") {
       if (yAuto) {
         yCenter = 0
         yHalf = xHalf
@@ -324,7 +422,7 @@ Panel {
     var tan = Plot.tangentAt(pts, t)
     var area = 0
     if (plotKind === "polar") area = Plot.areaPolar(pts, tMin, t)
-    else if (plotKind === "parametric") area = Plot.areaParametric(pts, tMin, t)
+    else if (plotKind === "parametric" || plotKind === "implicit") area = Plot.areaParametric(pts, tMin, t)
     else area = Plot.areaCartesian(pts, 0, t)
     return {
       tanX: tan.x,
@@ -337,72 +435,169 @@ Panel {
     }
   }
 
-  function playableKey() {
-    if (paramList && paramList.length) {
-      var i
-      for (i = 0; i < paramList.length; i++) {
-        if (paramList[i].name === "a") return "a"
-      }
-      for (i = 0; i < paramList.length; i++) {
-        if (!paramList[i].integer) return paramList[i].name
-      }
-      return paramList[0].name
-    }
-    return "__trace__"
+  function isAnimating(name) {
+    return playAnim[name] !== undefined
   }
 
-  function togglePlay() {
-    if (playing) {
-      playing = false
-      return
+  function animKeys() {
+    var keys = []
+    var k
+    for (k in playAnim) keys.push(k)
+    return keys
+  }
+
+  function animCopy() {
+    var next = {}
+    var k
+    for (k in playAnim) next[k] = playAnim[k]
+    return next
+  }
+
+  function paramSpec(name) {
+    var i
+    for (i = 0; i < paramList.length; i++) {
+      if (paramList[i].name === name) return paramList[i]
     }
-    playKey = playableKey()
-    playDir = 1
+    return null
+  }
+
+  // Where a slider already sits, as a 0..1 sweep position, so pressing play
+  // picks up from the current value instead of jumping to the start.
+  function animPhase(name) {
+    if (name === "__zoom__") return zoomSlider
+    if (name === "__azimuth__") return ((((azimuth + 180) % 360) + 360) % 360) / 360
+    if (name === "__elevation__") return (elevation + 90) / 180
+    if (name === "__trace__") {
+      var span = traceMax - traceMin
+      return span > 0 ? (pinnedTraceX - traceMin) / span : 0
+    }
+    var spec = paramSpec(name)
+    if (!spec) return 0
+    var lo = Number(spec.min)
+    var hi = Number(spec.max)
+    var v = Number(paramValues[name])
+    if (!isFinite(v) || !(hi > lo)) return 0
+    return (v - lo) / (hi - lo)
+  }
+
+  function animValid(name) {
+    if (name === "__zoom__") return true
+    if (name === "__trace__") return !is3d
+    if (name === "__azimuth__" || name === "__elevation__") return is3d
+    return paramSpec(name) !== null
+  }
+
+  function startAnimating(name) {
+    if (!name || !animValid(name)) return
+    var t = Plot.clamp(animPhase(name), 0, 1)
+    var next = animCopy()
+    next[name] = { phase: t, dir: t >= 1 ? -1 : 1 }
+    playAnim = next
     playing = true
   }
 
-  function tickPlay() {
-    var min
-    var max
-    var cur
-    var integer = false
-    if (playKey === "__trace__") {
-      min = traceMin
-      max = traceMax
-      cur = pinnedTraceX
-    } else {
-      var spec = null
-      for (var i = 0; i < paramList.length; i++) {
-        if (paramList[i].name === playKey) spec = paramList[i]
-      }
-      if (!spec) {
-        playing = false
-        return
-      }
-      min = Number(spec.min)
-      max = Number(spec.max)
-      cur = Number(paramValues[playKey])
-      integer = spec.integer === true
+  function stopAnimating(name) {
+    if (!isAnimating(name)) return
+    var next = animCopy()
+    delete next[name]
+    playAnim = next
+    if (name === "__zoom__" && !isCurve)
+      pinnedTraceX = Plot.clamp(pinnedTraceX, xMin, xMax)
+    if (!animKeys().length) {
+      playing = false
+      resample()
     }
-    var span = max - min
-    if (!(span > 0)) {
+  }
+
+  function toggleAnimating(name) {
+    if (isAnimating(name)) stopAnimating(name)
+    else startAnimating(name)
+  }
+
+  function stopAllAnimating() {
+    var wasZooming = isAnimating("__zoom__")
+    playAnim = ({})
+    if (wasZooming && !isCurve)
+      pinnedTraceX = Plot.clamp(pinnedTraceX, xMin, xMax)
+    if (playing) {
+      playing = false
+      resample()
+    }
+  }
+
+  function pruneAnimating() {
+    var next = {}
+    var k
+    for (k in playAnim) {
+      if (animValid(k)) next[k] = playAnim[k]
+    }
+    playAnim = next
+    if (!animKeys().length) playing = false
+  }
+
+  function tickPlay(dt) {
+    // Clamp so one long frame (a theme reload, a resize) cannot jump the sweep.
+    var step = Plot.clamp(isFinite(dt) ? dt : 0.016, 0, 0.05) / playSeconds
+    var keys = animKeys()
+    if (!keys.length) {
       playing = false
       return
     }
-    cur += playDir * span * 16 / 4000
-    if (cur >= max) {
-      cur = max
-      playDir = -1
-    } else if (cur <= min) {
-      cur = min
-      playDir = 1
+    var nextVals = {}
+    var k
+    for (k in paramValues) nextVals[k] = paramValues[k]
+    var paramsDirty = false
+    var viewDirty = false
+    var i
+    for (i = 0; i < keys.length; i++) {
+      var name = keys[i]
+      var state = playAnim[name]
+      state.phase += state.dir * step
+      if (state.phase >= 1) {
+        state.phase = 1
+        state.dir = -1
+      } else if (state.phase <= 0) {
+        state.phase = 0
+        state.dir = 1
+      }
+      var t = state.phase
+      if (name === "__zoom__") {
+        // Deliberately no tracer clamp here: clamping 60 times a second would
+        // walk the tracer (and with it the shaded area) into the origin as the
+        // window tightens, and it would not come back on the way out.
+        xHalf = halfFromSlider(t)
+        viewDirty = true
+        continue
+      }
+      if (name === "__azimuth__") {
+        azimuth = -180 + t * 360
+        if (azimuth >= 180) azimuth -= 360
+        continue
+      }
+      if (name === "__elevation__") {
+        elevation = Plot.clamp(-90 + t * 180, -90, 90)
+        continue
+      }
+      if (name === "__trace__") {
+        pinnedTraceX = traceMin + t * (traceMax - traceMin)
+        continue
+      }
+      var spec = paramSpec(name)
+      if (!spec) continue
+      var lo = Number(spec.min)
+      var hi = Number(spec.max)
+      var v = lo + t * (hi - lo)
+      if (spec.integer) v = Math.round(v)
+      nextVals[name] = v
+      paramsDirty = true
     }
-    if (integer) cur = Math.round(cur)
-    if (playKey === "__trace__") pinnedTraceX = cur
-    else setParam(playKey, cur)
+    if (paramsDirty) paramValues = nextVals
+    if (paramsDirty || viewDirty) resample()
+    persistSoon()
   }
 
   function zoomBy(factor, pivot) {
+    stopAnimating("__zoom__")
     var p = isFinite(pivot) ? pivot : xCenter
     var next = Plot.zoomAbout(xCenter, xHalf, factor, p)
     xCenter = next.xCenter
@@ -420,6 +615,7 @@ Panel {
   }
 
   function resetView() {
+    stopAnimating("__zoom__")
     if (analysis && analysis.ok) {
       xCenter = analysis.xCenter
       xHalf = analysis.xHalf
@@ -470,7 +666,9 @@ Panel {
       yHalf: yHalf,
       traceX: pinnedTraceX,
       azimuth: azimuth,
-      elevation: elevation
+      elevation: elevation,
+      showTangent: showTangent,
+      showArea: showArea
     }, null, 2) + "\n"
     configFile.setText(payload)
   }
@@ -490,6 +688,8 @@ Panel {
     if (isFinite(Number(data.traceX))) pinnedTraceX = Number(data.traceX)
     if (isFinite(Number(data.azimuth))) azimuth = Number(data.azimuth)
     if (isFinite(Number(data.elevation))) elevation = Plot.clamp(Number(data.elevation), -90, 90)
+    if (data.showTangent === false) showTangent = false
+    if (data.showArea === false) showArea = false
     if (equationField) equationField.text = eq
     parseEquation(eq, false)
     loadingConfig = false
@@ -525,11 +725,11 @@ Panel {
     onTriggered: root.persist()
   }
 
-  Timer {
-    interval: 16
+  // Frame-synced so the sweep lands on vsync instead of beating against it,
+  // and advances by elapsed time so a slow frame costs smoothness, not speed.
+  FrameAnimation {
     running: root.playing
-    repeat: true
-    onTriggered: root.tickPlay()
+    onTriggered: root.tickPlay(frameTime)
   }
 
   FileView {
@@ -563,12 +763,12 @@ Panel {
     centerOnBar: true
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(920))
-    contentHeight: panel.fittedContentHeight(Style.space(700), Style.space(860))
+    contentHeight: panel.fittedContentHeight(Style.space(760), Style.space(900))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      blocked: equationField.activeFocus || root.examplesOpen
+      blocked: equationField.activeFocus || root.examplesOpen || root.sliderEdits > 0
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
@@ -578,6 +778,18 @@ Panel {
         else if (t === "a" || t === "A") {
           root.yAuto = !root.yAuto
           root.resample()
+        }
+        else if (t === "t" || t === "T") {
+          if (!root.is3d) {
+            root.showTangent = !root.showTangent
+            root.persistSoon()
+          }
+        }
+        else if (t === "s" || t === "S") {
+          if (!root.is3d) {
+            root.showArea = !root.showArea
+            root.persistSoon()
+          }
         }
         else if (t === "[") root.panBy(-root.xHalf * 0.15)
         else if (t === "]") root.panBy(root.xHalf * 0.15)
@@ -610,8 +822,11 @@ Panel {
               fontFamily: root.contentFontFamily
               onPopupOpenChanged: root.examplesOpen = popupOpen
               onChanged: function(next) {
+                root.applyingExample = true
+                parseTimer.stop()
                 equationField.text = next
                 root.parseEquation(next, true)
+                root.applyingExample = false
                 keyCatcher.forceActiveFocus()
               }
             }
@@ -649,8 +864,10 @@ Panel {
             foreground: root.contentForeground
             font.family: root.contentFontFamily
             font.pixelSize: Style.font.subtitle
-            placeholderText: "sin(x),  r=1+cos(t),  x=cos(t); y=sin(3t)"
-            onTextChanged: parseTimer.restart()
+            placeholderText: "sin(x),  x^2 + y^2 = 1,  r=1+cos(t)"
+            onTextChanged: {
+              if (!root.applyingExample) parseTimer.restart()
+            }
             onAccepted: {
               parseTimer.stop()
               root.parseEquation(text, false)
@@ -691,8 +908,9 @@ Panel {
             yMin: root.yMin
             yMax: root.yMax
             series: root.series
-            usesTrig: analysis.usesTrig === true && !root.isCurve
+            usesTrig: analysis.usesTrig === true && root.plotKind !== "polar" && root.plotKind !== "parametric"
             kind: root.plotKind
+            equalScale: root.isCurve
             independent: analysis.independent || "x"
             xAxisLabel: "x"
             yAxisLabel: "y"
@@ -700,8 +918,8 @@ Panel {
             traceX: root.liveTraceX
             traceYs: root.traceYs
             hovering: root.plotHovering
-            showTangent: !root.is3d
-            showArea: !root.is3d
+            showTangent: !root.is3d && root.showTangent
+            showArea: !root.is3d && root.showArea
             areaValue: root.geom.area
             tanX: root.geom.tanX
             tanY: root.geom.tanY
@@ -709,13 +927,15 @@ Panel {
             tanDy: root.geom.tanDy
             tracePlotX: root.geom.px
             tracePlotY: root.geom.py
+            snapKind: root.snapKind
+            snapColor: Color.urgent
             foreground: root.contentForeground
             background: Color.popups.background
             accent: Color.accent
             muted: Color.muted
             fontFamily: root.contentFontFamily
             onHoverAt: function(x) {
-              root.hoverX = x
+              root.hoverX = root.snapTrace(x)
               root.plotHovering = true
             }
             onHoverEnded: root.plotHovering = false
@@ -723,7 +943,7 @@ Panel {
             onZoomAt: function(factor, pivot) { root.zoomBy(factor, pivot) }
             onResetView: root.resetView()
             onPinTrace: function(x) {
-              root.pinnedTraceX = x
+              root.pinnedTraceX = root.snapTrace(x)
               root.persistSoon()
             }
           }
@@ -778,6 +998,7 @@ Panel {
             fillColor: Color.accent
             knobColor: root.contentForeground
             onMoved: function(v) {
+              root.stopAnimating("__zoom__")
               root.xHalf = root.halfFromSlider(v)
               if (!root.isCurve) root.pinnedTraceX = Plot.clamp(root.pinnedTraceX, root.xMin, root.xMax)
               root.resample()
@@ -819,11 +1040,11 @@ Panel {
           }
 
           PanelActionButton {
-            iconText: root.playing ? "󰏤" : "󰐊"
-            tooltipText: root.playing ? "Pause" : (root.paramList.length ? "Play parameter" : "Play tracer")
+            iconText: root.playAnim["__zoom__"] !== undefined ? "󰏤" : "󰐊"
+            tooltipText: root.playAnim["__zoom__"] !== undefined ? "Stop zoom" : "Animate zoom"
             foreground: root.contentForeground
             fontFamily: root.contentFontFamily
-            onClicked: root.togglePlay()
+            onClicked: root.toggleAnimating("__zoom__")
           }
 
           Text {
@@ -848,6 +1069,54 @@ Panel {
           }
         }
 
+        RowLayout {
+          Layout.fillWidth: true
+          Layout.preferredHeight: 40
+          Layout.minimumHeight: 40
+          Layout.maximumHeight: 40
+          spacing: Style.space(10)
+
+          Text {
+            text: "TANGENT"
+            color: Qt.darker(root.contentForeground, 1.5)
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1
+            Layout.alignment: Qt.AlignVCenter
+          }
+
+          ToggleSwitch {
+            checked: root.showTangent
+            foreground: root.contentForeground
+            onToggled: {
+              root.showTangent = !root.showTangent
+              root.persistSoon()
+            }
+          }
+
+          Text {
+            text: "AREA"
+            color: Qt.darker(root.contentForeground, 1.5)
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1
+            Layout.alignment: Qt.AlignVCenter
+          }
+
+          ToggleSwitch {
+            checked: root.showArea
+            foreground: root.contentForeground
+            onToggled: {
+              root.showArea = !root.showArea
+              root.persistSoon()
+            }
+          }
+
+          Item { Layout.fillWidth: true }
+        }
+
         ParamSlider {
           visible: !root.yAuto && !root.is3d
           Layout.fillWidth: true
@@ -861,8 +1130,14 @@ Panel {
           bar: root.bar
           foreground: root.contentForeground
           fontFamily: root.contentFontFamily
+          onInputFocusChanged: function(on) { root.noteSliderFocus(on) }
           onMoved: function(v) {
             root.yHalf = Math.max(0.2, root.halfFromSlider(v))
+            root.yMin = root.yCenter - root.yHalf
+            root.yMax = root.yCenter + root.yHalf
+          }
+          onValueEntered: function(v) {
+            root.yHalf = Math.max(0.2, v)
             root.yMin = root.yCenter - root.yHalf
             root.yMax = root.yCenter + root.yHalf
           }
@@ -882,9 +1157,16 @@ Panel {
           bar: root.bar
           foreground: root.contentForeground
           fontFamily: root.contentFontFamily
+          animating: root.playAnim["__trace__"] !== undefined
+          onAnimateClicked: root.toggleAnimating("__trace__")
+          onInputFocusChanged: function(on) { root.noteSliderFocus(on) }
           onMoved: function(v) {
-            root.playing = false
-            root.pinnedTraceX = v
+            root.stopAnimating("__trace__")
+            root.pinnedTraceX = root.snapTrace(v)
+          }
+          onValueEntered: function(v) {
+            root.stopAnimating("__trace__")
+            root.pinnedTraceX = Plot.clamp(v, root.traceMin, root.traceMax)
           }
           onReleased: root.persistSoon()
         }
@@ -902,7 +1184,17 @@ Panel {
           bar: root.bar
           foreground: root.contentForeground
           fontFamily: root.contentFontFamily
-          onMoved: function(v) { root.azimuth = v - 180 }
+          animating: root.playAnim["__azimuth__"] !== undefined
+          onAnimateClicked: root.toggleAnimating("__azimuth__")
+          onInputFocusChanged: function(on) { root.noteSliderFocus(on) }
+          onMoved: function(v) {
+            root.stopAnimating("__azimuth__")
+            root.azimuth = v - 180
+          }
+          onValueEntered: function(v) {
+            root.stopAnimating("__azimuth__")
+            root.azimuth = ((v + 180) % 360 + 360) % 360 - 180
+          }
           onReleased: root.persistSoon()
         }
 
@@ -920,7 +1212,17 @@ Panel {
           bar: root.bar
           foreground: root.contentForeground
           fontFamily: root.contentFontFamily
-          onMoved: function(v) { root.elevation = v }
+          animating: root.playAnim["__elevation__"] !== undefined
+          onAnimateClicked: root.toggleAnimating("__elevation__")
+          onInputFocusChanged: function(on) { root.noteSliderFocus(on) }
+          onMoved: function(v) {
+            root.stopAnimating("__elevation__")
+            root.elevation = v
+          }
+          onValueEntered: function(v) {
+            root.stopAnimating("__elevation__")
+            root.elevation = Plot.clamp(v, -90, 90)
+          }
           onReleased: root.persistSoon()
         }
 
@@ -956,9 +1258,17 @@ Panel {
                 bar: root.bar
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
+                animating: root.playAnim[modelData.name] !== undefined
+                onAnimateClicked: root.toggleAnimating(modelData.name)
+                onInputFocusChanged: function(on) { root.noteSliderFocus(on) }
                 onMoved: function(v) {
-                  if (root.playKey === modelData.name) root.playing = false
+                  root.stopAnimating(modelData.name)
                   root.setParam(modelData.name, v)
+                }
+                onValueEntered: function(v) {
+                  root.stopAnimating(modelData.name)
+                  root.setParam(modelData.name, v)
+                  root.expandIfNeeded(index, v)
                 }
                 onReleased: function(v) {
                   root.expandIfNeeded(index, v)

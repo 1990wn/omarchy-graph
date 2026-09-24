@@ -364,13 +364,82 @@ Parser.prototype.parseSum = function() {
   return { type: "sum", index: index, from: fromAst, to: toAst, body: body }
 }
 
-function parseOne(tokens) {
-  var stripped = stripLhs(tokens)
-  if (!stripped.length) throw parseError("Empty equation")
-  var p = new Parser(stripped.concat([{ type: "eof" }]))
+function tokensNoEof(tokens) {
+  var out = []
+  for (var i = 0; i < tokens.length; i++) {
+    if (tokens[i].type !== "eof") out.push(tokens[i])
+  }
+  return out
+}
+
+function isSumIndexEq(tokens, i) {
+  if (i < 1 || tokens[i - 1].type !== "id") return false
+  if (i >= 2 && tokens[i - 2].type === "id" && tokens[i - 2].name === "from") return true
+  if (i >= 2 && (tokens[i - 2].type === "lparen" || tokens[i - 2].type === "comma")) return true
+  return false
+}
+
+function splitEq(tokens) {
+  var depth = 0
+  var idx = -1
+  for (var i = 0; i < tokens.length; i++) {
+    var t = tokens[i]
+    if (t.type === "lparen" || t.type === "pipe") depth++
+    if (t.type === "rparen") depth = Math.max(0, depth - 1)
+    if (t.type === "eq" && depth === 0) {
+      if (isSumIndexEq(tokens, i)) continue
+      if (idx >= 0) return { many: true }
+      idx = i
+    }
+  }
+  if (idx < 0) return null
+  return { left: tokens.slice(0, idx), right: tokens.slice(idx + 1) }
+}
+
+function isSimpleLhs(tokens) {
+  if (tokens.length === 1 && tokens[0].type === "id") return true
+  if (tokens.length >= 3 && tokens[0].type === "id" && tokens[1].type === "lparen") {
+    var depth = 0
+    for (var i = 1; i < tokens.length; i++) {
+      if (tokens[i].type === "lparen") depth++
+      else if (tokens[i].type === "rparen") {
+        depth--
+        if (depth === 0) return i === tokens.length - 1
+      }
+    }
+  }
+  return false
+}
+
+function parseExprTokens(tokens) {
+  if (!tokens.length) throw parseError("Empty equation")
+  var p = new Parser(tokens.concat([{ type: "eof" }]))
   var ast = p.parseExpr(0)
   if (!p.at("eof")) throw parseError("Unexpected extra input")
   return ast
+}
+
+function parseOne(tokens) {
+  var t = tokensNoEof(tokens)
+  var parts = splitEq(t)
+  if (parts && parts.many) throw parseError("Too many '='")
+  if (parts && isSimpleLhs(parts.left)) {
+    var name = parts.left[0].name
+    if (name === "y" || name === "z" || name === "r" || name === "f")
+      return parseExprTokens(parts.right)
+    if (name === "x") {
+      var rightAst = parseExprTokens(parts.right)
+      var rhsVars = {}
+      collectVars(rightAst, rhsVars)
+      if (rhsVars.y)
+        return { type: "eq", left: { type: "var", name: "x" }, right: rightAst }
+      return rightAst
+    }
+    return { type: "eq", left: parseExprTokens(parts.left), right: parseExprTokens(parts.right) }
+  }
+  if (parts)
+    return { type: "eq", left: parseExprTokens(parts.left), right: parseExprTokens(parts.right) }
+  return parseExprTokens(t)
 }
 
 function collectVars(ast, into, bound) {
@@ -401,6 +470,10 @@ function collectVars(ast, into, bound) {
     inner[ast.index] = true
     collectVars(ast.body, into, inner)
   }
+  if (ast.type === "eq") {
+    collectVars(ast.left, into, bound)
+    collectVars(ast.right, into, bound)
+  }
 }
 
 function collectCalls(ast, into) {
@@ -418,6 +491,10 @@ function collectCalls(ast, into) {
     collectCalls(ast.from, into)
     collectCalls(ast.to, into)
     collectCalls(ast.body, into)
+  }
+  if (ast.type === "eq") {
+    collectCalls(ast.left, into)
+    collectCalls(ast.right, into)
   }
 }
 
@@ -466,7 +543,7 @@ function indepsOf() {
   return o
 }
 
-function pickAxes(varSet, lhsNames) {
+function pickAxes(varSet, lhsNames, implicitEq) {
   var names = lhsNames || []
   var lhs = names.length ? names[0] : ""
   var ix = -1
@@ -501,6 +578,18 @@ function pickAxes(varSet, lhsNames) {
       output: "xy",
       indexX: ix,
       indexY: iy
+    }
+  }
+  if (implicitEq && varSet.x && varSet.y && lhs !== "z" && lhs !== "y") {
+    return {
+      kind: "implicit",
+      dim: 2,
+      independent: "t",
+      independent2: "",
+      independents: { x: true, y: true },
+      output: "F",
+      indexX: 0,
+      indexY: -1
     }
   }
   var want3d = lhs === "z" || (!!varSet.x && !!varSet.y && lhs !== "y")
@@ -562,6 +651,8 @@ function cloneAst(ast) {
       to: cloneAst(ast.to),
       body: cloneAst(ast.body)
     }
+  if (ast.type === "eq")
+    return { type: "eq", left: cloneAst(ast.left), right: cloneAst(ast.right) }
   return ast
 }
 
@@ -569,6 +660,7 @@ function promoteNumbers(ast, used, params, mode) {
   if (!ast) return ast
   if (ast.type === "num") {
     if (mode === "bound-from") return ast
+    if (mode === "exponent") return ast
     if (mode === "bound-to") {
       var boundName = !used["N"] ? "N" : nextParamName(used)
       used[boundName] = true
@@ -591,7 +683,7 @@ function promoteNumbers(ast, used, params, mode) {
     params.push({
       name: name,
       value: ast.value,
-      kind: "number",
+      kind: mode === "exponent" ? "exponent" : "number",
       source: ast.value
     })
     return { type: "param", name: name, source: ast.value }
@@ -602,13 +694,21 @@ function promoteNumbers(ast, used, params, mode) {
       args.push(promoteNumbers(ast.args[i], used, params, mode))
     return { type: "call", name: ast.name, args: args }
   }
-  if (ast.type === "op")
+  if (ast.type === "op") {
+    if (ast.op === "^")
+      return {
+        type: "op",
+        op: "^",
+        left: promoteNumbers(ast.left, used, params, mode),
+        right: promoteNumbers(ast.right, used, params, "exponent")
+      }
     return {
       type: "op",
       op: ast.op,
       left: promoteNumbers(ast.left, used, params, mode),
       right: promoteNumbers(ast.right, used, params, mode)
     }
+  }
   if (ast.type === "uop")
     return { type: "uop", op: ast.op, arg: promoteNumbers(ast.arg, used, params, mode) }
   if (ast.type === "sum") {
@@ -621,6 +721,12 @@ function promoteNumbers(ast, used, params, mode) {
       body: promoteNumbers(ast.body, used, params, mode)
     }
   }
+  if (ast.type === "eq")
+    return {
+      type: "eq",
+      left: promoteNumbers(ast.left, used, params, mode),
+      right: promoteNumbers(ast.right, used, params, mode)
+    }
   return ast
 }
 
@@ -660,6 +766,12 @@ function replaceNamed(ast, independents, bound) {
       body: replaceNamed(ast.body, independents, inner)
     }
   }
+  if (ast.type === "eq")
+    return {
+      type: "eq",
+      left: replaceNamed(ast.left, independents, bound),
+      right: replaceNamed(ast.right, independents, bound)
+    }
   return ast
 }
 
@@ -681,6 +793,10 @@ function collectParams(ast, into) {
     collectParams(ast.from, into)
     collectParams(ast.to, into)
     collectParams(ast.body, into)
+  }
+  if (ast.type === "eq") {
+    collectParams(ast.left, into)
+    collectParams(ast.right, into)
   }
 }
 
@@ -834,52 +950,116 @@ function callFunc(name, args) {
   }
 }
 
-function evaluate(ast, env) {
-  if (!ast) return NaN
-  if (ast.type === "num") return ast.value
-  if (ast.type === "const") return CONSTANTS[ast.name]
+// Math functions that are exactly their callFunc case, so a compiled call can
+// jump straight to them instead of walking the string switch every sample.
+var DIRECT_UNARY = {
+  sin: Math.sin, cos: Math.cos, tan: Math.tan,
+  asin: Math.asin, acos: Math.acos, atan: Math.atan,
+  sinh: Math.sinh, cosh: Math.cosh, tanh: Math.tanh,
+  exp: Math.exp, ln: Math.log, sqrt: Math.sqrt, cbrt: Math.cbrt,
+  abs: Math.abs, floor: Math.floor, ceil: Math.ceil, round: Math.round,
+  trunc: Math.trunc, sign: Math.sign
+}
+
+var CALL_SCRATCH = [0]
+
+function compileConst(value) {
+  return function() { return value }
+}
+
+// Turn an AST into a closure so a sweep pays the type dispatch once per node
+// instead of once per node per sample. A sum over N terms at ~1400 samples a
+// frame is otherwise far too slow to animate.
+function compile(ast) {
+  if (!ast) return compileConst(NaN)
+  if (ast.type === "num") return compileConst(ast.value)
+  if (ast.type === "const") return compileConst(CONSTANTS[ast.name])
   if (ast.type === "var" || ast.type === "param") {
-    var v = env[ast.name]
-    return typeof v === "number" ? v : NaN
+    var key = ast.name
+    return function(env) {
+      var v = env[key]
+      return typeof v === "number" ? v : NaN
+    }
   }
   if (ast.type === "uop") {
-    var a = evaluate(ast.arg, env)
-    return ast.op === "-" ? -a : a
+    var operand = compile(ast.arg)
+    if (ast.op === "-") return function(env) { return -operand(env) }
+    return operand
   }
   if (ast.type === "call") {
-    var args = []
-    for (var i = 0; i < ast.args.length; i++) args.push(evaluate(ast.args[i], env))
-    return callFunc(ast.name, args)
+    var argFns = []
+    var i
+    for (i = 0; i < ast.args.length; i++) argFns.push(compile(ast.args[i]))
+    var name = ast.name
+    if (argFns.length === 1) {
+      var only = argFns[0]
+      var direct = DIRECT_UNARY[name]
+      if (direct) return function(env) { return direct(only(env)) }
+      return function(env) {
+        // Safe to reuse: only(env) has fully returned before we store into it.
+        CALL_SCRATCH[0] = only(env)
+        return callFunc(name, CALL_SCRATCH)
+      }
+    }
+    return function(env) {
+      var args = []
+      for (var k = 0; k < argFns.length; k++) args.push(argFns[k](env))
+      return callFunc(name, args)
+    }
   }
   if (ast.type === "op") {
-    var l = evaluate(ast.left, env)
-    var r = evaluate(ast.right, env)
-    if (ast.op === "+") return l + r
-    if (ast.op === "-") return l - r
-    if (ast.op === "*") return l * r
-    if (ast.op === "/") return l / r
-    if (ast.op === "%") return l % r
-    if (ast.op === "^") return Math.pow(l, r)
+    var l = compile(ast.left)
+    var r = compile(ast.right)
+    if (ast.op === "+") return function(env) { return l(env) + r(env) }
+    if (ast.op === "-") return function(env) { return l(env) - r(env) }
+    if (ast.op === "*") return function(env) { return l(env) * r(env) }
+    if (ast.op === "/") return function(env) { return l(env) / r(env) }
+    if (ast.op === "%") return function(env) { return l(env) % r(env) }
+    if (ast.op === "^") return function(env) { return Math.pow(l(env), r(env)) }
+    return compileConst(NaN)
   }
   if (ast.type === "sum") {
-    var from = evaluate(ast.from, env)
-    var to = evaluate(ast.to, env)
-    if (!isFinite(from) || !isFinite(to)) return NaN
-    var lo = Math.round(from)
-    var hi = Math.round(to)
-    if (hi < lo) return 0
-    if (hi - lo + 1 > 256) hi = lo + 255
-    var total = 0
-    var saved = env[ast.index]
-    for (var n = lo; n <= hi; n++) {
-      env[ast.index] = n
-      total += evaluate(ast.body, env)
+    var fromFn = compile(ast.from)
+    var toFn = compile(ast.to)
+    var bodyFn = compile(ast.body)
+    var index = ast.index
+    return function(env) {
+      var from = fromFn(env)
+      var to = toFn(env)
+      if (!isFinite(from) || !isFinite(to)) return NaN
+      var lo = Math.round(from)
+      var hi = Math.round(to)
+      if (hi < lo) return 0
+      if (hi - lo + 1 > 256) hi = lo + 255
+      var total = 0
+      var saved = env[index]
+      for (var n = lo; n <= hi; n++) {
+        env[index] = n
+        total += bodyFn(env)
+      }
+      if (saved === undefined) delete env[index]
+      else env[index] = saved
+      return total
     }
-    if (saved === undefined) delete env[ast.index]
-    else env[ast.index] = saved
-    return total
   }
-  return NaN
+  return compileConst(NaN)
+}
+
+// Compiled form is cached on the node, so repeated sampling of one equation
+// compiles once and every later call is a plain function call.
+function compiled(ast) {
+  if (!ast) return compileConst(NaN)
+  var fn = ast.compiledFn
+  if (!fn) {
+    fn = compile(ast)
+    ast.compiledFn = fn
+  }
+  return fn
+}
+
+function evaluate(ast, env) {
+  if (!ast) return NaN
+  return compiled(ast)(env)
 }
 
 function defaultView(usesTrig, usesLog) {
@@ -909,9 +1089,14 @@ function analyze(source) {
     }
     var lhsNames = []
     for (var gi = 0; gi < groups.length; gi++) lhsNames.push(lhsName(groups[gi]))
-    var axes = pickAxes(varSet, lhsNames)
+    var implicitEq = false
+    for (var ti0 = 0; ti0 < trees.length; ti0++) {
+      if (trees[ti0] && trees[ti0].type === "eq") implicitEq = true
+    }
+    var axes = pickAxes(varSet, lhsNames, implicitEq)
     var independent = axes.independent
     var used = {}
+    for (var iname in axes.independents) used[iname] = true
     used[independent] = true
     if (axes.independent2) used[axes.independent2] = true
     used.z = true
@@ -948,6 +1133,16 @@ function analyze(source) {
       if (ti < 0 || ti >= trees.length) continue
       var ast = replaceNamed(cloneAst(trees[ti]), axes.independents)
       ast = promoteNumbers(ast, used, params)
+      if (ast && ast.type === "eq") {
+        var eqPretty = pretty(ast.left) + " = " + pretty(ast.right)
+        expressions.push({
+          ast: { type: "op", op: "-", left: ast.left, right: ast.right },
+          pretty: eqPretty,
+          role: "F"
+        })
+        pretties.push(eqPretty)
+        continue
+      }
       var role = roles[axes.kind] ? roles[axes.kind][e] : "y"
       expressions.push({ ast: ast, pretty: pretty(ast), role: role })
       pretties.push((role === "y" && axes.kind === "cartesian" ? "" : role + " = ") + pretty(ast))
@@ -1017,6 +1212,10 @@ function analyze(source) {
     if (axes.kind === "polar" || axes.kind === "parametric") {
       if (!usesTrig) tMax = 10
       view = { xCenter: 0, xHalf: axes.kind === "polar" ? 2.5 : 1.6 }
+    }
+    if (axes.kind === "implicit") {
+      view = usesTrig ? { xCenter: 0, xHalf: Math.PI * 2 } : { xCenter: 0, xHalf: 2.5 }
+      tMax = 1
     }
     return {
       ok: true,

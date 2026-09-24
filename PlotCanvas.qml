@@ -31,7 +31,11 @@ Item {
   property real tanDy: 0
   property real tracePlotX: NaN
   property real tracePlotY: NaN
-  readonly property bool curveTrace: kind === "polar" || kind === "parametric"
+  // "" when the tracer is free, otherwise "zero" | "peak" | "cross".
+  property string snapKind: ""
+  property color snapColor: Color.urgent
+  readonly property bool snapped: snapKind !== ""
+  readonly property bool curveTrace: kind === "polar" || kind === "parametric" || kind === "implicit"
   property color foreground: Color.foreground
   property color background: Color.background
   property color accent: Color.accent
@@ -41,14 +45,48 @@ Item {
   property int bodySize: Style.font.body
   property real cornerRadius: Style.cornerRadius
 
+  property bool equalScale: false
+
   readonly property int padLeft: Style.space(52)
   readonly property int padRight: Style.space(36)
   readonly property int padTop: Style.space(28)
   readonly property int padBottom: Style.space(36)
-  readonly property real plotLeft: padLeft
-  readonly property real plotRight: Math.max(padLeft + 8, width - padRight)
-  readonly property real plotTop: padTop
-  readonly property real plotBottom: Math.max(padTop + 8, height - padBottom)
+  readonly property real plotLeft: {
+    if (!equalScale) return padLeft
+    var xSpan = Math.max(1e-12, xMax - xMin)
+    var ySpan = Math.max(1e-12, yMax - yMin)
+    var availW = Math.max(1, width - padLeft - padRight)
+    var availH = Math.max(1, height - padTop - padBottom)
+    var s = Math.min(availW / xSpan, availH / ySpan)
+    return padLeft + (availW - xSpan * s) / 2
+  }
+  readonly property real plotRight: {
+    if (!equalScale) return Math.max(padLeft + 8, width - padRight)
+    var xSpan = Math.max(1e-12, xMax - xMin)
+    var ySpan = Math.max(1e-12, yMax - yMin)
+    var availW = Math.max(1, width - padLeft - padRight)
+    var availH = Math.max(1, height - padTop - padBottom)
+    var s = Math.min(availW / xSpan, availH / ySpan)
+    return plotLeft + xSpan * s
+  }
+  readonly property real plotTop: {
+    if (!equalScale) return padTop
+    var xSpan = Math.max(1e-12, xMax - xMin)
+    var ySpan = Math.max(1e-12, yMax - yMin)
+    var availW = Math.max(1, width - padLeft - padRight)
+    var availH = Math.max(1, height - padTop - padBottom)
+    var s = Math.min(availW / xSpan, availH / ySpan)
+    return padTop + (availH - ySpan * s) / 2
+  }
+  readonly property real plotBottom: {
+    if (!equalScale) return Math.max(padTop + 8, height - padBottom)
+    var xSpan = Math.max(1e-12, xMax - xMin)
+    var ySpan = Math.max(1e-12, yMax - yMin)
+    var availW = Math.max(1, width - padLeft - padRight)
+    var availH = Math.max(1, height - padTop - padBottom)
+    var s = Math.min(availW / xSpan, availH / ySpan)
+    return plotTop + ySpan * s
+  }
 
   signal hoverAt(real x)
   signal hoverEnded()
@@ -227,6 +265,7 @@ Item {
 
   function fillSeries(ctx, points, color) {
     if (!showArea || !points || !points.length) return
+    if (kind === "implicit") return
     if (curveTrace) {
       fillPolarArea(ctx, points, color)
       return
@@ -235,20 +274,29 @@ Item {
     var hi = Math.max(0, traceX)
     if (!isFinite(traceX)) return
     var started = false
+    var filled = false
     var firstX = 0
     var lastX = 0
     var prev = null
+
+    // Drop down to the axis and close the run that is open, if any. The whole
+    // shaded region is one path, so this can happen several times (each break
+    // in the curve ends a run) and the fill at the end covers all of them.
+    function closeRun() {
+      if (!started) return
+      var base = pxY(Math.max(yMin, Math.min(yMax, 0)))
+      ctx.lineTo(lastX, base)
+      ctx.lineTo(firstX, base)
+      ctx.closePath()
+      started = false
+      filled = true
+    }
+
     ctx.beginPath()
     for (var i = 0; i < points.length; i++) {
       var p = points[i]
       if (!p || !p.ok || p.x < lo - 1e-12 || p.x > hi + 1e-12 || Plot.shouldBreak(prev, p, yMin, yMax)) {
-        if (started) {
-          var base = pxY(Math.max(yMin, Math.min(yMax, 0)))
-          ctx.lineTo(lastX, base)
-          ctx.lineTo(firstX, base)
-          ctx.closePath()
-        }
-        started = false
+        closeRun()
         prev = p && p.ok ? p : null
         continue
       }
@@ -264,11 +312,8 @@ Item {
       lastX = x
       prev = p
     }
-    if (started) {
-      var base2 = pxY(Math.max(yMin, Math.min(yMax, 0)))
-      ctx.lineTo(lastX, base2)
-      ctx.lineTo(firstX, base2)
-      ctx.closePath()
+    closeRun()
+    if (filled) {
       ctx.fillStyle = css(color, 0.20)
       ctx.fill()
     }
@@ -295,6 +340,21 @@ Item {
     ctx.closePath()
     ctx.fillStyle = css(color, 0.18)
     ctx.fill()
+  }
+
+  function snapLabel() {
+    if (snapKind === "zero") return "ZERO"
+    if (snapKind === "peak") return "PEAK"
+    if (snapKind === "cross") return "CROSS"
+    return ""
+  }
+
+  function drawSnapRing(ctx, px, py) {
+    ctx.beginPath()
+    ctx.arc(px, py, 9, 0, Math.PI * 2)
+    ctx.strokeStyle = css(snapColor, 0.75)
+    ctx.lineWidth = 1.5
+    ctx.stroke()
   }
 
   function drawTangent(ctx) {
@@ -328,7 +388,7 @@ Item {
     ctx.rect(plotLeft, plotTop, plotRight - plotLeft, plotBottom - plotTop)
     ctx.clip()
     if (!curveTrace && isFinite(traceX) && traceX >= xMin && traceX <= xMax) {
-      ctx.strokeStyle = css(foreground, hovering ? 0.35 : 0.22)
+      ctx.strokeStyle = snapped ? css(snapColor, 0.55) : css(foreground, hovering ? 0.35 : 0.22)
       ctx.lineWidth = 1
       ctx.setLineDash([4, 4])
       ctx.beginPath()
@@ -340,7 +400,8 @@ Item {
 
     var labels = []
     if (curveTrace && isFinite(px) && isFinite(py)) {
-      ctx.fillStyle = css(accent, 1)
+      if (snapped) drawSnapRing(ctx, px, py)
+      ctx.fillStyle = snapped ? css(snapColor, 1) : css(accent, 1)
       ctx.beginPath()
       ctx.arc(px, py, 4.5, 0, Math.PI * 2)
       ctx.fill()
@@ -353,7 +414,8 @@ Item {
         if (!pt || !pt.ok || !isFinite(pt.y)) continue
         var pty = pxY(pt.y)
         if (pty < plotTop - 4 || pty > plotBottom + 4) continue
-        ctx.fillStyle = css(pt.color || accent, 1)
+        if (snapped) drawSnapRing(ctx, px, pty)
+        ctx.fillStyle = snapped ? css(snapColor, 1) : css(pt.color || accent, 1)
         ctx.beginPath()
         ctx.arc(px, pty, 4.5, 0, Math.PI * 2)
         ctx.fill()
@@ -382,6 +444,7 @@ Item {
       bits.push("m = ∞")
     if (showArea && isFinite(areaValue))
       bits.push("A = " + Plot.formatNumber(areaValue))
+    if (snapped) bits.push(snapLabel())
     if (!bits.length) return
     ctx.font = captionSize + "px \"" + fontFamily + "\""
     var text = bits.join("    ")
@@ -500,11 +563,13 @@ Item {
   onTanYChanged: canvas.requestPaint()
   onTanDxChanged: canvas.requestPaint()
   onTanDyChanged: canvas.requestPaint()
+  onSnapKindChanged: canvas.requestPaint()
   onTracePlotXChanged: canvas.requestPaint()
   onTracePlotYChanged: canvas.requestPaint()
   onPrettyChanged: canvas.requestPaint()
   onForegroundChanged: canvas.requestPaint()
   onAccentChanged: canvas.requestPaint()
+  onEqualScaleChanged: canvas.requestPaint()
   onWidthChanged: canvas.requestPaint()
   onHeightChanged: canvas.requestPaint()
 }
