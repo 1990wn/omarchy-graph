@@ -34,6 +34,9 @@ Item {
   // "" when the tracer is free, otherwise "zero" | "peak" | "cross".
   property string snapKind: ""
   property color snapColor: Color.urgent
+  // Lower limit of the shaded integral, and whether the user pinned it there.
+  property real areaFrom: 0
+  property bool areaBoundSet: false
   readonly property bool snapped: snapKind !== ""
   readonly property bool curveTrace: kind === "polar" || kind === "parametric" || kind === "implicit"
   property color foreground: Color.foreground
@@ -94,6 +97,7 @@ Item {
   signal zoomAt(real factor, real pivot)
   signal resetView()
   signal pinTrace(real x)
+  signal setAreaBound(real x)
 
   function css(c, a) {
     var alpha = a === undefined ? c.a : a
@@ -270,8 +274,9 @@ Item {
       fillPolarArea(ctx, points, color)
       return
     }
-    var lo = Math.min(0, traceX)
-    var hi = Math.max(0, traceX)
+    var from = isFinite(areaFrom) ? areaFrom : 0
+    var lo = Math.min(from, traceX)
+    var hi = Math.max(from, traceX)
     if (!isFinite(traceX)) return
     var started = false
     var filled = false
@@ -326,12 +331,13 @@ Item {
     ctx.beginPath()
     ctx.moveTo(originX, originY)
     var any = false
+    var tFrom = isFinite(areaFrom) ? areaFrom : 0
     var tMax = traceX
     for (var i = 0; i < points.length; i++) {
       var p = points[i]
       if (!p || !p.ok) continue
       var t = p.t !== undefined ? p.t : 0
-      if (t < -1e-12) continue
+      if (t < tFrom - 1e-12) continue
       if (t > tMax + 1e-12) break
       ctx.lineTo(pxX(p.x), pxY(p.y))
       any = true
@@ -355,6 +361,53 @@ Item {
     ctx.strokeStyle = css(snapColor, 0.75)
     ctx.lineWidth = 1.5
     ctx.stroke()
+  }
+
+  // The pinned lower limit: a dashed rule on a cartesian plot, a ring on the
+  // curve itself where there is no meaningful vertical.
+  function drawAreaBound(ctx) {
+    if (!areaBoundSet || !showArea || !isFinite(areaFrom)) return
+    ctx.save()
+    ctx.beginPath()
+    ctx.rect(plotLeft, plotTop, plotRight - plotLeft, plotBottom - plotTop)
+    ctx.clip()
+    if (curveTrace) {
+      var pts = series.length && series[0] ? series[0].points : null
+      var best = null
+      var bestD = 1e15
+      for (var i = 0; pts && i < pts.length; i++) {
+        var p = pts[i]
+        if (!p || !p.ok) continue
+        var d = Math.abs((p.t !== undefined ? p.t : 0) - areaFrom)
+        if (d < bestD) {
+          bestD = d
+          best = p
+        }
+      }
+      if (best) {
+        ctx.beginPath()
+        ctx.arc(pxX(best.x), pxY(best.y), 5, 0, Math.PI * 2)
+        ctx.strokeStyle = css(foreground, 0.7)
+        ctx.lineWidth = 1.5
+        ctx.stroke()
+      }
+    } else if (areaFrom >= xMin && areaFrom <= xMax) {
+      var bx = pxX(areaFrom)
+      ctx.strokeStyle = css(foreground, 0.45)
+      ctx.lineWidth = 1
+      ctx.setLineDash([2, 3])
+      ctx.beginPath()
+      ctx.moveTo(bx, plotTop)
+      ctx.lineTo(bx, plotBottom)
+      ctx.stroke()
+      ctx.setLineDash([])
+      ctx.fillStyle = css(foreground, 0.7)
+      ctx.font = "italic " + captionSize + "px \"" + fontFamily + "\""
+      ctx.textAlign = "center"
+      ctx.textBaseline = "top"
+      ctx.fillText("a", bx, plotTop + Style.space(2))
+    }
+    ctx.restore()
   }
 
   function drawTangent(ctx) {
@@ -444,6 +497,8 @@ Item {
       bits.push("m = ∞")
     if (showArea && isFinite(areaValue))
       bits.push("A = " + Plot.formatNumber(areaValue))
+    if (showArea && areaBoundSet)
+      bits.push("a = " + Plot.formatTick(areaFrom, usesTrig || curveTrace))
     if (snapped) bits.push(snapLabel())
     if (!bits.length) return
     ctx.font = captionSize + "px \"" + fontFamily + "\""
@@ -491,6 +546,7 @@ Item {
         root.strokeSeries(ctx, s.points, col, 1.8, 1)
       }
       ctx.restore()
+      root.drawAreaBound(ctx)
       root.drawTangent(ctx)
       root.drawTrace(ctx)
     }
@@ -529,6 +585,10 @@ Item {
         root.resetView()
         return
       }
+      if (ev.modifiers & Qt.ShiftModifier) {
+        root.setAreaBound(root.pickIndependent(ev.x, ev.y))
+        return
+      }
       dragging = true
       lastX = ev.x
       root.pinTrace(root.pickIndependent(ev.x, ev.y))
@@ -564,6 +624,8 @@ Item {
   onTanDxChanged: canvas.requestPaint()
   onTanDyChanged: canvas.requestPaint()
   onSnapKindChanged: canvas.requestPaint()
+  onAreaFromChanged: canvas.requestPaint()
+  onAreaBoundSetChanged: canvas.requestPaint()
   onTracePlotXChanged: canvas.requestPaint()
   onTracePlotYChanged: canvas.requestPaint()
   onPrettyChanged: canvas.requestPaint()

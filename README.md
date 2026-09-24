@@ -51,10 +51,18 @@ to the tracer update live (`m` and `A` in the readout). **TANGENT** and
 on — where the curve crosses the axis, where it turns around, and where two
 series meet — so an area runs to an exact boundary rather than to the nearest
 sample. A caught tracer turns the alert color, grows a ring, and names what it
-caught (**ZERO**, **PEAK**, **CROSS**) in the readout. Each slider has a play
-button on the right:
-press it and that slider starts sweeping from where it sits, press it again to
-stop. The play button in the zoom row does the same for zoom, so the plot
+caught (**ZERO**, **PEAK**, **CROSS**) in the readout. **←** / **→** walk the
+tracer from one feature to the next, so you can survey a function without
+aiming at it.
+
+The area runs from the origin by default. Space (or the pin next to **FROM**,
+or shift-click on the plot) pins the lower limit at the tracer instead, and
+`x` clears it; the limit shows up as a dashed `a` rule and in the readout. With
+both ends snapped to features, `A` is a real definite integral — one hump of
+`sin(x)`, one petal of a rose, the area under a peak.
+
+Each slider has a play button on the right: press it and that slider starts
+sweeping from where it sits, press it again to stop. The play button in the zoom row does the same for zoom, so the plot
 zooms in and back out on its own. Run as many at once as you like — touching a
 slider only stops that one.
 
@@ -74,6 +82,9 @@ overlay a second series are supported. Functions include `sin` `cos` `tan`
 - Double-click or the reset button restores the default window
 - Right-click the plot also resets
 - `+` / `-` zoom, `[` / `]` pan, `0` reset, `a` toggles Y auto-scale
+- `←` / `→` step the tracer between features, space pins the area's lower
+  limit there, `x` clears it
+- `t` and `s` toggle the tangent and the shaded area
 - Tick labels switch to π, π/2, 2π when the window is a trig range
 
 The first series is the theme accent. Further series pick cyan / magenta /

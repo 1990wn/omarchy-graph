@@ -441,3 +441,45 @@ test("polar zeros land on the petal edges of r = sin(3t)", function () {
     assert.ok(Math.abs(t.t - k * Math.PI / 3) < 1e-3)
   })
 })
+
+test("an area between arbitrary bounds matches the exact integral", function () {
+  const a = E.analyze("sin(x)")
+  const pts = P.sampleSeries(E.evaluate, a.expressions[0].ast, "x", a.params, {}, -7, 7, 801)
+  const cases = [[0, Math.PI], [Math.PI / 6, Math.PI / 2], [1, 2], [-2, -0.5]]
+  cases.forEach(function (pair) {
+    const got = P.areaCartesian(pts, pair[0], pair[1])
+    const want = Math.cos(pair[0]) - Math.cos(pair[1])
+    assert.ok(Math.abs(got - want) < 1e-3, pair + " gave " + got + ", wanted " + want)
+  })
+})
+
+test("swapping the bounds negates the area", function () {
+  const a = E.analyze("sin(x)")
+  const pts = P.sampleSeries(E.evaluate, a.expressions[0].ast, "x", a.params, {}, -7, 7, 801)
+  const forward = P.areaCartesian(pts, 0, Math.PI)
+  assert.ok(Math.abs(forward + P.areaCartesian(pts, Math.PI, 0)) < 1e-12)
+})
+
+test("one petal of r = sin(3t) integrates to pi/12", function () {
+  const a = E.analyze("r = sin(3t)")
+  const pts = P.samplePolar(E.evaluate, a.expressions[0].ast, a.independent, a.params, {}, 0, Math.PI * 2, 900)
+  assert.ok(Math.abs(P.areaPolar(pts, 0, Math.PI / 3) - Math.PI / 12) < 1e-4)
+})
+
+test("half of the unit circle integrates to pi/2", function () {
+  const a = E.analyze("x = cos(t); y = sin(t)")
+  const pts = P.sampleParametric(E.evaluate, a.expressions[0].ast, a.expressions[1].ast,
+    a.independent, a.params, {}, 0, Math.PI * 2, 900)
+  assert.ok(Math.abs(P.areaParametric(pts, 0, Math.PI) - Math.PI / 2) < 1e-3)
+})
+
+test("snap targets come back in order, so stepping can walk them", function () {
+  const a = E.analyze("sin(x); cos(x)")
+  const values = {}
+  const series = a.expressions.map(function (e) {
+    return { points: P.sampleSeries(E.evaluate, e.ast, a.independent, a.params, values, -7, 7, 800) }
+  })
+  const targets = P.snapTargets(series, false, 4)
+  assert.ok(targets.length > 5)
+  for (var i = 1; i < targets.length; i++) assert.ok(targets[i].t >= targets[i - 1].t)
+})

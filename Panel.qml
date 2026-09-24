@@ -84,6 +84,9 @@ Panel {
   property bool applyingExample: false
   property bool showTangent: true
   property bool showArea: true
+  // Lower limit of the shaded integral. NaN means the default: the origin for
+  // cartesian plots, the start of the parameter range for curves.
+  property real areaFrom: NaN
   property int sliderEdits: 0
 
   function noteSliderFocus(on) {
@@ -117,6 +120,8 @@ Panel {
     }
     return isCurve ? tMax : xMax
   }
+  readonly property bool areaBoundSet: isFinite(areaFrom)
+  readonly property real areaStart: areaBoundSet ? areaFrom : (isCurve ? tMin : 0)
   readonly property var geom: geometryAt(liveTraceX, series)
   // Recomputing mid-sweep would cost a frame and nothing snaps while a slider
   // is driving the tracer, so the targets go away until the sweep stops.
@@ -225,6 +230,45 @@ Panel {
     return isFinite(refined) ? refined : target.t
   }
 
+  function setAreaBound(t) {
+    if (is3d || !isFinite(t)) return
+    areaFrom = Plot.clamp(t, traceMin, traceMax)
+    showArea = true
+    persistSoon()
+  }
+
+  function clearAreaBound() {
+    if (!areaBoundSet) return
+    areaFrom = NaN
+    persistSoon()
+  }
+
+  function toggleAreaBound() {
+    if (areaBoundSet) clearAreaBound()
+    else setAreaBound(liveTraceX)
+  }
+
+  // Walk the tracer to the next feature in that direction. With nothing to
+  // catch (no targets, or none left that way) it nudges instead, so the arrow
+  // keys always do something.
+  function stepFeature(dir) {
+    if (is3d || !dir) return
+    stopAnimating("__trace__")
+    var eps = Math.max(1e-9, (traceMax - traceMin) * 1e-6)
+    var from = liveTraceX
+    var pick = null
+    for (var i = 0; i < snapTargets.length; i++) {
+      var t = snapTargets[i].t
+      if (dir > 0 ? t <= from + eps : t >= from - eps) continue
+      if (!pick || (dir > 0 ? t < pick.t : t > pick.t)) pick = snapTargets[i]
+    }
+    plotHovering = false
+    pinnedTraceX = pick
+      ? Plot.clamp(refineSnap(pick), traceMin, traceMax)
+      : Plot.clamp(from + dir * (traceMax - traceMin) / 50, traceMin, traceMax)
+    persistSoon()
+  }
+
   function snapTrace(t) {
     var hit = Plot.nearestSnap(snapTargets, t, snapTolerance)
     if (!hit) return t
@@ -303,6 +347,7 @@ Panel {
     equationText = incoming
     paramList = next.params.slice()
     pruneAnimating()
+    if (!loadingConfig && !sameText) areaFrom = NaN
     if (resetView) {
       xCenter = next.xCenter
       xHalf = next.xHalf
@@ -421,9 +466,9 @@ Panel {
     if (!pts || !isFinite(t)) return empty
     var tan = Plot.tangentAt(pts, t)
     var area = 0
-    if (plotKind === "polar") area = Plot.areaPolar(pts, tMin, t)
-    else if (plotKind === "parametric" || plotKind === "implicit") area = Plot.areaParametric(pts, tMin, t)
-    else area = Plot.areaCartesian(pts, 0, t)
+    if (plotKind === "polar") area = Plot.areaPolar(pts, areaStart, t)
+    else if (plotKind === "parametric" || plotKind === "implicit") area = Plot.areaParametric(pts, areaStart, t)
+    else area = Plot.areaCartesian(pts, areaStart, t)
     return {
       tanX: tan.x,
       tanY: tan.y,
@@ -668,7 +713,8 @@ Panel {
       azimuth: azimuth,
       elevation: elevation,
       showTangent: showTangent,
-      showArea: showArea
+      showArea: showArea,
+      areaFrom: areaBoundSet ? areaFrom : null
     }, null, 2) + "\n"
     configFile.setText(payload)
   }
@@ -690,6 +736,7 @@ Panel {
     if (isFinite(Number(data.elevation))) elevation = Plot.clamp(Number(data.elevation), -90, 90)
     if (data.showTangent === false) showTangent = false
     if (data.showArea === false) showArea = false
+    areaFrom = isFinite(Number(data.areaFrom)) ? Number(data.areaFrom) : NaN
     if (equationField) equationField.text = eq
     parseEquation(eq, false)
     loadingConfig = false
@@ -771,6 +818,9 @@ Panel {
       blocked: equationField.activeFocus || root.examplesOpen || root.sliderEdits > 0
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
+      onMoveRequested: function(dx, dy) { if (dx) root.stepFeature(dx) }
+      onActivateRequested: root.setAreaBound(root.liveTraceX)
+      onDeleteRequested: root.clearAreaBound()
       onTextKey: function(t) {
         if (t === "+" || t === "=") root.zoomBy(0.82, root.xCenter)
         else if (t === "-" || t === "_") root.zoomBy(1.22, root.xCenter)
@@ -929,6 +979,9 @@ Panel {
             tracePlotY: root.geom.py
             snapKind: root.snapKind
             snapColor: Color.urgent
+            areaFrom: root.areaStart
+            areaBoundSet: root.areaBoundSet
+            onSetAreaBound: function(x) { root.setAreaBound(root.snapTrace(x)) }
             foreground: root.contentForeground
             background: Color.popups.background
             accent: Color.accent
@@ -1112,6 +1165,29 @@ Panel {
               root.showArea = !root.showArea
               root.persistSoon()
             }
+          }
+
+          Text {
+            text: "FROM"
+            visible: !root.is3d
+            color: Qt.darker(root.contentForeground, 1.5)
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 1
+            Layout.alignment: Qt.AlignVCenter
+            Layout.leftMargin: Style.space(6)
+          }
+
+          PanelActionButton {
+            visible: !root.is3d
+            iconText: "\uf08d"
+            tooltipText: root.areaBoundSet
+              ? "Integrate from " + Plot.formatNumber(root.areaFrom) + " — click to clear (x)"
+              : "Integrate from the tracer instead of the origin (space)"
+            foreground: root.areaBoundSet ? Color.accent : root.contentForeground
+            fontFamily: root.contentFontFamily
+            onClicked: root.toggleAreaBound()
           }
 
           Item { Layout.fillWidth: true }

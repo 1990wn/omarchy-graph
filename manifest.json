@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "graph",
   "name": "Graph",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "author": "1990wn",
   "license": "MIT",
   "description": "Theme-aware graphing calculator. Type an equation, then zoom, pan, and slide every coefficient live.",

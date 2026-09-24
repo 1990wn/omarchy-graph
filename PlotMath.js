@@ -403,16 +403,20 @@ function areaCartesian(points, fromX, toX) {
       prev = null
       continue
     }
-    if (p.x < a - 1e-12) {
-      prev = p
-      continue
-    }
-    if (p.x > b + 1e-12) break
+    // Every segment that overlaps [a, b] contributes, including the two that
+    // straddle the bounds: their height is interpolated where they are cut,
+    // so a bound landing between samples still integrates to it exactly.
     if (prev && prev.ok) {
       var x0 = Math.max(a, prev.x)
       var x1 = Math.min(b, p.x)
-      if (x1 > x0) sum += (prev.y + p.y) * 0.5 * (x1 - x0)
+      if (x1 > x0) {
+        var xSpan = p.x - prev.x
+        var y0 = xSpan > 0 ? prev.y + (p.y - prev.y) * (x0 - prev.x) / xSpan : prev.y
+        var y1 = xSpan > 0 ? prev.y + (p.y - prev.y) * (x1 - prev.x) / xSpan : p.y
+        sum += (y0 + y1) * 0.5 * (x1 - x0)
+      }
     }
+    if (p.x > b + 1e-12) break
     prev = p
   }
   return fromX > toX ? -sum : sum
@@ -430,16 +434,17 @@ function areaPolar(points, fromT, toT) {
       prev = null
       continue
     }
-    if (p.t < a - 1e-12) {
-      prev = p
-      continue
-    }
-    if (p.t > b + 1e-12) break
     if (prev && prev.ok) {
       var t0 = Math.max(a, prev.t)
       var t1 = Math.min(b, p.t)
-      if (t1 > t0) sum += 0.5 * (prev.r * prev.r + p.r * p.r) * 0.5 * (t1 - t0)
+      if (t1 > t0) {
+        var tSpan = p.t - prev.t
+        var r0 = tSpan > 0 ? prev.r + (p.r - prev.r) * (t0 - prev.t) / tSpan : prev.r
+        var r1 = tSpan > 0 ? prev.r + (p.r - prev.r) * (t1 - prev.t) / tSpan : p.r
+        sum += 0.5 * (r0 * r0 + r1 * r1) * 0.5 * (t1 - t0)
+      }
     }
+    if (p.t > b + 1e-12) break
     prev = p
   }
   return fromT > toT ? -sum : sum
@@ -457,13 +462,23 @@ function areaParametric(points, fromT, toT) {
       prev = null
       continue
     }
-    if (p.t < a - 1e-12) {
-      prev = p
-      continue
+    // Shoelace over the segments inside the bounds; a straddling segment is
+    // cut at the bound and its endpoint interpolated along the chord.
+    if (prev && prev.ok) {
+      var t0 = Math.max(a, prev.t)
+      var t1 = Math.min(b, p.t)
+      if (t1 > t0) {
+        var tSpan = p.t - prev.t
+        var f0 = tSpan > 0 ? (t0 - prev.t) / tSpan : 0
+        var f1 = tSpan > 0 ? (t1 - prev.t) / tSpan : 1
+        var x0 = prev.x + (p.x - prev.x) * f0
+        var y0 = prev.y + (p.y - prev.y) * f0
+        var x1 = prev.x + (p.x - prev.x) * f1
+        var y1 = prev.y + (p.y - prev.y) * f1
+        sum += x0 * y1 - x1 * y0
+      }
     }
     if (p.t > b + 1e-12) break
-    if (prev && prev.ok)
-      sum += prev.x * p.y - p.x * prev.y
     prev = p
   }
   var area = 0.5 * sum
